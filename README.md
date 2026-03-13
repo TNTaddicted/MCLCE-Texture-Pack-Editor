@@ -14,6 +14,7 @@ A small WinForms tool for browsing and editing `.arc` (`.swf`) and `.pck` packag
 
 ## 📦 Using the installer (Recommended)
 Head to the releases and download the prebuilt installer!
+https://github.com/TNTaddicted/MCLCE-Texture-Pack-Editor/releases
 
 ## 🏗️ Building from source
 From a PowerShell prompt in this folder:
