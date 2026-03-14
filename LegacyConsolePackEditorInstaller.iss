@@ -1,6 +1,6 @@
-#define MyAppName "Legacy Console Pack Editor"
-#define MyAppVersion "1.0"
-#define MySourceDir "C:\\Users\\eolia\\minecraft-legacy-editor\\LegacyConsolePackEditor\\bin\\Release\\net8.0-windows"
+#define MyAppName "MC LCE TP Editor"
+#define MyAppVersion "0.1"
+#define MySourceDir "C:\Users\{user}\minecraft-legacy-editor\LegacyConsolePackEditor\bin\Release\net8.0-windows"
 
 [Setup]
 AppName={#MyAppName}

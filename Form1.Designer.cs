@@ -6,6 +6,7 @@ partial class Form1
     private MenuStrip menuStrip1;
     private ToolStripMenuItem fileToolStripMenuItem;
     private ToolStripMenuItem openArchiveToolStripMenuItem;
+    private ToolStripMenuItem openFolderToolStripMenuItem;
     private ToolStripMenuItem saveArchiveToolStripMenuItem;
     private ToolStripMenuItem exitToolStripMenuItem;
     private SplitContainer splitContainer1;
@@ -29,6 +30,7 @@ partial class Form1
     private StatusStrip statusStrip1;
     private ToolStripStatusLabel toolStripStatusLabel1;
     private OpenFileDialog openFileDialog;
+    private FolderBrowserDialog folderBrowserDialog;
     private SaveFileDialog saveFileDialog;
     private ContextMenuStrip contextMenuTreeView;
     private ToolStripMenuItem extractToolStripMenuItem;
@@ -63,6 +65,7 @@ partial class Form1
         menuStrip1 = new MenuStrip();
         fileToolStripMenuItem = new ToolStripMenuItem();
         openArchiveToolStripMenuItem = new ToolStripMenuItem();
+        openFolderToolStripMenuItem = new ToolStripMenuItem();
         saveArchiveToolStripMenuItem = new ToolStripMenuItem();
         exitToolStripMenuItem = new ToolStripMenuItem();
         splitContainer1 = new SplitContainer();
@@ -86,6 +89,7 @@ partial class Form1
         statusStrip1 = new StatusStrip();
         toolStripStatusLabel1 = new ToolStripStatusLabel();
         openFileDialog = new OpenFileDialog();
+        folderBrowserDialog = new FolderBrowserDialog();
         saveFileDialog = new SaveFileDialog();
         contextMenuTreeView = new ContextMenuStrip(components);
         extractToolStripMenuItem = new ToolStripMenuItem();
@@ -104,7 +108,7 @@ partial class Form1
         menuStrip1.Text = "menuStrip1";
 
         // fileToolStripMenuItem
-        fileToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { openArchiveToolStripMenuItem, saveArchiveToolStripMenuItem, new ToolStripSeparator(), embedSwfEditorToolStripMenuItem, new ToolStripSeparator(), exitToolStripMenuItem });
+        fileToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { openArchiveToolStripMenuItem, openFolderToolStripMenuItem, saveArchiveToolStripMenuItem, new ToolStripSeparator(), embedSwfEditorToolStripMenuItem, new ToolStripSeparator(), exitToolStripMenuItem });
         fileToolStripMenuItem.Name = "fileToolStripMenuItem";
         fileToolStripMenuItem.Text = "&File";
 
@@ -112,6 +116,11 @@ partial class Form1
         openArchiveToolStripMenuItem.Name = "openArchiveToolStripMenuItem";
         openArchiveToolStripMenuItem.Text = "&Open...";
         openArchiveToolStripMenuItem.Click += openArchiveToolStripMenuItem_Click;
+
+        // openFolderToolStripMenuItem
+        openFolderToolStripMenuItem.Name = "openFolderToolStripMenuItem";
+        openFolderToolStripMenuItem.Text = "Open &Folder...";
+        openFolderToolStripMenuItem.Click += openFolderToolStripMenuItem_Click;
 
         // saveArchiveToolStripMenuItem
         saveArchiveToolStripMenuItem.Name = "saveArchiveToolStripMenuItem";
@@ -311,6 +320,10 @@ partial class Form1
         // openFileDialog
         openFileDialog.Filter = "Minecraft Archive (*.arc)|*.arc|PCK File (*.pck)|*.pck|SWF File (*.swf)|*.swf|All Files (*.*)|*.*";
         openFileDialog.Multiselect = true;
+
+        // folderBrowserDialog
+        folderBrowserDialog.Description = "Open a Minecraft legacy texture pack folder";
+        folderBrowserDialog.UseDescriptionForTitle = true;
 
         // saveFileDialog
         saveFileDialog.Filter = "Minecraft Archive (.arc)|*.arc|All files (*.*)|*.*";
