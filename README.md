@@ -38,3 +38,16 @@ After building and adding the needed files, run the executable under:
 ```
 bin\\Release\\net8.0-windows\\LegacyConsolePackEditor.exe
 ```
+
+# TODO
+
+- [ ] Add an app icon
+- [ ] Make the `.loc` file editing work correctly with safeguards
+- [ ] Revamp the UI to make it feel comfortable to use
+- [ ] In-app `.swf` editor
+- [ ] Download a pre-made example pack
+- [ ] Animation viewer
+- [ ] Maybe a web app?
+- [x] In-app .png editor
+- [x] Open folders
+- [x] Basic Hex editor
