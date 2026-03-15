@@ -27,11 +27,6 @@ From a PowerShell prompt in this folder:
 dotnet build -c Release
 ```
 
-## Download the prebuilt JAR (Only when building manually)
-1. Go to https://github.com/jindrapetrik/jpexs-decompiler/releases
-2. Download the latest `ffdec.jar` and `ffdec.exe` (usually inside a zip)
-3. Copy them to one of this location:
-   - `bin\Release\net8.0-windows\`
 
 After building and adding the needed files, run the executable under:
 
@@ -41,11 +36,11 @@ bin\\Release\\net8.0-windows\\LegacyConsolePackEditor.exe
 
 # TODO
 
-- [ ] Add an app icon
+- [x] Add an app icon
 - [ ] Make the `.loc` file editing work correctly with safeguards
-- [ ] Revamp the UI to make it feel comfortable to use
-- [ ] In-app `.swf` editor
-- [ ] Download a pre-made example pack
+- [x] Revamp the UI to make it feel comfortable to use
+- [x] In-app `.swf` editor
+- [x] Download a pre-made example pack
 - [ ] Animation viewer
 - [ ] Maybe a web app?
 - [x] In-app .png editor
