@@ -7,6 +7,9 @@ partial class Form1
     private ToolStripMenuItem fileToolStripMenuItem;
     private ToolStripMenuItem openArchiveToolStripMenuItem;
     private ToolStripMenuItem openFolderToolStripMenuItem;
+    private ToolStripMenuItem downloadTemplateToolStripMenuItem;
+    private ToolStripMenuItem loadTemplateToolStripMenuItem;
+    private ToolStripMenuItem recentItemsToolStripMenuItem;
     private ToolStripMenuItem saveArchiveToolStripMenuItem;
     private ToolStripMenuItem exitToolStripMenuItem;
     private SplitContainer splitContainer1;
@@ -18,6 +21,8 @@ partial class Form1
     private ToolStripButton toolStripButtonPckReplace;
     private ToolStripButton toolStripButtonPckOpen;
     private ToolStripButton toolStripButtonPckDelete;
+    private ToolStrip toolStripSwf;
+    private ToolStripButton toolStripButtonSwfCapture;
     private SplitContainer splitContainerPck;
     private TreeView treeViewPck;
     private SplitContainer splitContainerPckRight;
@@ -26,9 +31,13 @@ partial class Form1
     private Label labelPckInfo;
     private TabPage tabPageSwfEditor;
     private Panel panelSwfHost;
-    private Microsoft.Web.WebView2.WinForms.WebView2 webView2Swf;
+    private Panel panelHome;
+    private TableLayoutPanel tableLayoutPanelHome;
+    private PictureBox pictureBoxHomeLogo;
+    private Label labelHomeMessage;
     private StatusStrip statusStrip1;
     private ToolStripStatusLabel toolStripStatusLabel1;
+    private ToolStripProgressBar toolStripProgressBar;
     private OpenFileDialog openFileDialog;
     private FolderBrowserDialog folderBrowserDialog;
     private SaveFileDialog saveFileDialog;
@@ -66,6 +75,9 @@ partial class Form1
         fileToolStripMenuItem = new ToolStripMenuItem();
         openArchiveToolStripMenuItem = new ToolStripMenuItem();
         openFolderToolStripMenuItem = new ToolStripMenuItem();
+        downloadTemplateToolStripMenuItem = new ToolStripMenuItem();
+        loadTemplateToolStripMenuItem = new ToolStripMenuItem();
+        recentItemsToolStripMenuItem = new ToolStripMenuItem();
         saveArchiveToolStripMenuItem = new ToolStripMenuItem();
         exitToolStripMenuItem = new ToolStripMenuItem();
         splitContainer1 = new SplitContainer();
@@ -77,6 +89,8 @@ partial class Form1
         toolStripButtonPckReplace = new ToolStripButton();
         toolStripButtonPckOpen = new ToolStripButton();
         toolStripButtonPckDelete = new ToolStripButton();
+        toolStripSwf = new ToolStrip();
+        toolStripButtonSwfCapture = new ToolStripButton();
         splitContainerPck = new SplitContainer();
         treeViewPck = new TreeView();
         splitContainerPckRight = new SplitContainer();
@@ -85,7 +99,10 @@ partial class Form1
         labelPckInfo = new Label();
         tabPageSwfEditor = new TabPage();
         panelSwfHost = new Panel();
-        webView2Swf = new Microsoft.Web.WebView2.WinForms.WebView2();
+        panelHome = new Panel();
+        tableLayoutPanelHome = new TableLayoutPanel();
+        pictureBoxHomeLogo = new PictureBox();
+        labelHomeMessage = new Label();
         statusStrip1 = new StatusStrip();
         toolStripStatusLabel1 = new ToolStripStatusLabel();
         openFileDialog = new OpenFileDialog();
@@ -108,7 +125,7 @@ partial class Form1
         menuStrip1.Text = "menuStrip1";
 
         // fileToolStripMenuItem
-        fileToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { openArchiveToolStripMenuItem, openFolderToolStripMenuItem, saveArchiveToolStripMenuItem, new ToolStripSeparator(), embedSwfEditorToolStripMenuItem, new ToolStripSeparator(), exitToolStripMenuItem });
+        fileToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { openArchiveToolStripMenuItem, openFolderToolStripMenuItem, downloadTemplateToolStripMenuItem, loadTemplateToolStripMenuItem, recentItemsToolStripMenuItem, saveArchiveToolStripMenuItem, new ToolStripSeparator(), embedSwfEditorToolStripMenuItem, new ToolStripSeparator(), exitToolStripMenuItem });
         fileToolStripMenuItem.Name = "fileToolStripMenuItem";
         fileToolStripMenuItem.Text = "&File";
 
@@ -121,6 +138,20 @@ partial class Form1
         openFolderToolStripMenuItem.Name = "openFolderToolStripMenuItem";
         openFolderToolStripMenuItem.Text = "Open &Folder...";
         openFolderToolStripMenuItem.Click += openFolderToolStripMenuItem_Click;
+
+        // downloadTemplateToolStripMenuItem
+        downloadTemplateToolStripMenuItem.Name = "downloadTemplateToolStripMenuItem";
+        downloadTemplateToolStripMenuItem.Text = "Download Template...";
+        downloadTemplateToolStripMenuItem.Click += downloadTemplateToolStripMenuItem_Click;
+
+        // loadTemplateToolStripMenuItem
+        loadTemplateToolStripMenuItem.Name = "loadTemplateToolStripMenuItem";
+        loadTemplateToolStripMenuItem.Text = "Load new template";
+        loadTemplateToolStripMenuItem.Click += loadTemplateToolStripMenuItem_Click;
+
+        // recentItemsToolStripMenuItem
+        recentItemsToolStripMenuItem.Name = "recentItemsToolStripMenuItem";
+        recentItemsToolStripMenuItem.Text = "Open &Recent";
 
         // saveArchiveToolStripMenuItem
         saveArchiveToolStripMenuItem.Name = "saveArchiveToolStripMenuItem";
@@ -158,12 +189,13 @@ partial class Form1
         tabControlMain.SelectedIndex = 0;
         tabControlMain.Size = new Size(716, 604);
         tabControlMain.TabIndex = 0;
+        tabControlMain.Visible = false;
         tabControlMain.Controls.Add(tabPagePck);
         tabControlMain.Controls.Add(tabPageSwfEditor);
         splitContainer1.Panel2.Controls.Add(tabControlMain);
 
         // tabPagePck
-        tabPagePck.Controls.Add(splitContainerPck);
+        tabPagePck.Controls.Add(splitContainerPckRight);
         tabPagePck.Controls.Add(toolStripPck);
         tabPagePck.Location = new Point(4, 24);
         tabPagePck.Name = "tabPagePck";
@@ -202,6 +234,21 @@ partial class Form1
         toolStripButtonPckDelete.DisplayStyle = ToolStripItemDisplayStyle.Text;
         toolStripButtonPckDelete.Text = "Delete";
         toolStripButtonPckDelete.Click += toolStripButtonPckDelete_Click;
+
+        // toolStripSwf
+        toolStripSwf.Dock = DockStyle.Top;
+        toolStripSwf.Items.AddRange(new ToolStripItem[] { toolStripButtonSwfCapture });
+        toolStripSwf.Location = new Point(3, 3);
+        toolStripSwf.Name = "toolStripSwf";
+        toolStripSwf.Size = new Size(702, 25);
+        toolStripSwf.TabIndex = 0;
+        toolStripSwf.GripStyle = ToolStripGripStyle.Hidden;
+        toolStripSwf.RenderMode = ToolStripRenderMode.System;
+
+        // toolStripButtonSwfCapture
+        toolStripButtonSwfCapture.DisplayStyle = ToolStripItemDisplayStyle.Text;
+        toolStripButtonSwfCapture.Text = "Edit Bitmap";
+        toolStripButtonSwfCapture.Click += toolStripButtonSwfCapture_Click;
 
         // splitContainerPck
         splitContainerPck.Dock = DockStyle.Fill;
@@ -253,9 +300,11 @@ partial class Form1
         pictureBoxPckPreview.Location = new Point(0, 0);
         pictureBoxPckPreview.Name = "pictureBoxPckPreview";
         pictureBoxPckPreview.Size = new Size(174, 523);
-        pictureBoxPckPreview.SizeMode = PictureBoxSizeMode.Zoom;
+        pictureBoxPckPreview.SizeMode = PictureBoxSizeMode.Normal;
         pictureBoxPckPreview.TabIndex = 0;
         pictureBoxPckPreview.TabStop = false;
+        pictureBoxPckPreview.BackColor = Color.White;
+        pictureBoxPckPreview.Paint += PictureBoxPckPreview_Paint;
 
         // labelPckInfo
         labelPckInfo.Dock = DockStyle.Bottom;
@@ -271,12 +320,11 @@ partial class Form1
         splitContainerPckRight.Panel2.Controls.Add(pictureBoxPckPreview);
         splitContainerPckRight.Panel2.Controls.Add(labelPckInfo);
 
-        splitContainerPck.Panel1.Controls.Add(treeViewPck);
-        splitContainerPck.Panel2.Controls.Add(splitContainerPckRight);
+        // treeViewPck and splitContainerPck are kept for non-visual PCK state but not shown in the layout.
 
         // tabPageSwfEditor
         tabPageSwfEditor.Controls.Add(panelSwfHost);
-        tabPageSwfEditor.Controls.Add(webView2Swf);
+        tabPageSwfEditor.Controls.Add(toolStripSwf);
         tabPageSwfEditor.Location = new Point(4, 24);
         tabPageSwfEditor.Name = "tabPageSwfEditor";
         tabPageSwfEditor.Padding = new Padding(3);
@@ -287,30 +335,63 @@ partial class Form1
 
         // panelSwfHost
         panelSwfHost.Dock = DockStyle.Fill;
-        panelSwfHost.Location = new Point(3, 3);
+        panelSwfHost.Location = new Point(3, 28);
         panelSwfHost.Name = "panelSwfHost";
-        panelSwfHost.Size = new Size(702, 570);
+        panelSwfHost.Size = new Size(702, 545);
         panelSwfHost.TabIndex = 0;
-        panelSwfHost.Visible = false;
+        panelSwfHost.Visible = true;
 
-        // webView2Swf
-        webView2Swf.AllowExternalDrop = true;
-        webView2Swf.CreationProperties = null;
-        webView2Swf.DefaultBackgroundColor = Color.Black;
-        webView2Swf.Dock = DockStyle.Fill;
-        webView2Swf.Location = new Point(3, 3);
-        webView2Swf.Name = "webView2Swf";
-        webView2Swf.Size = new Size(702, 570);
-        webView2Swf.TabIndex = 0;
-        webView2Swf.ZoomFactor = 1D;
+        // panelHome
+        panelHome.Dock = DockStyle.Fill;
+        panelHome.Location = new Point(0, 0);
+        panelHome.Name = "panelHome";
+        panelHome.Size = new Size(716, 604);
+        panelHome.TabIndex = 2;
+        panelHome.BackColor = Color.LightGray;
+        panelHome.BorderStyle = BorderStyle.FixedSingle;
+
+        tableLayoutPanelHome.ColumnCount = 1;
+        tableLayoutPanelHome.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        tableLayoutPanelHome.RowCount = 3;
+        tableLayoutPanelHome.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+        tableLayoutPanelHome.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        tableLayoutPanelHome.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+        tableLayoutPanelHome.Dock = DockStyle.Fill;
+        tableLayoutPanelHome.Padding = new Padding(0, 40, 0, 40);
+
+        pictureBoxHomeLogo.Anchor = AnchorStyles.None;
+        pictureBoxHomeLogo.Size = new Size(640, 260);
+        pictureBoxHomeLogo.SizeMode = PictureBoxSizeMode.Zoom;
+        pictureBoxHomeLogo.Margin = new Padding(0, 0, 0, 16);
+        pictureBoxHomeLogo.BackColor = Color.LightGray;
+
+        labelHomeMessage.Anchor = AnchorStyles.None;
+        labelHomeMessage.AutoSize = true;
+        labelHomeMessage.Font = new Font("Segoe UI", 12F, FontStyle.Regular, GraphicsUnit.Point);
+        labelHomeMessage.ForeColor = Color.FromArgb(80, 80, 80);
+        labelHomeMessage.Text = "Open an ARC/PCK/SWF file to begin";
+        labelHomeMessage.TextAlign = ContentAlignment.MiddleCenter;
+
+        tableLayoutPanelHome.Controls.Add(pictureBoxHomeLogo, 0, 1);
+        tableLayoutPanelHome.Controls.Add(labelHomeMessage, 0, 2);
+        panelHome.Controls.Add(tableLayoutPanelHome);
+        splitContainer1.Panel2.Controls.Add(panelHome);
 
         // statusStrip1
-        statusStrip1.Items.AddRange(new ToolStripItem[] { toolStripStatusLabel1 });
+        toolStripProgressBar = new ToolStripProgressBar();
+
+        statusStrip1.Items.AddRange(new ToolStripItem[] { toolStripStatusLabel1, toolStripProgressBar });
         statusStrip1.Location = new Point(0, 628);
         statusStrip1.Name = "statusStrip1";
         statusStrip1.Size = new Size(1000, 22);
         statusStrip1.TabIndex = 2;
         statusStrip1.Text = "statusStrip1";
+
+        // toolStripProgressBar
+        toolStripProgressBar.Alignment = ToolStripItemAlignment.Right;
+        toolStripProgressBar.Name = "toolStripProgressBar";
+        toolStripProgressBar.Size = new Size(180, 16);
+        toolStripProgressBar.Visible = false;
 
         // toolStripStatusLabel1
         toolStripStatusLabel1.Name = "toolStripStatusLabel1";
@@ -345,8 +426,8 @@ partial class Form1
 
         // embedSwfEditorToolStripMenuItem
         embedSwfEditorToolStripMenuItem.Name = "embedSwfEditorToolStripMenuItem";
-        embedSwfEditorToolStripMenuItem.Text = "Use built-in SWF viewer";
-        embedSwfEditorToolStripMenuItem.CheckOnClick = true;
+        embedSwfEditorToolStripMenuItem.Text = "Native SWF bitmap editor";
+        embedSwfEditorToolStripMenuItem.CheckOnClick = false;
         embedSwfEditorToolStripMenuItem.Checked = true;
         embedSwfEditorToolStripMenuItem.Click += embedSwfEditorToolStripMenuItem_Click;
 
@@ -374,7 +455,7 @@ partial class Form1
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
         MainMenuStrip = menuStrip1;
         Name = "Form1";
-        Text = "Legacy Console Pack Editor";
+        Text = "MCLCE Texture Pack Editor";
         AllowDrop = true;
         DragEnter += Form1_DragEnter;
         DragDrop += Form1_DragDrop;

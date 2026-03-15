@@ -1,0 +1,4 @@
+bin/
+obj/
+LegacyConsolePackEditorInstaller.iss
+LegacyConsolePackEditor-Setup.exe

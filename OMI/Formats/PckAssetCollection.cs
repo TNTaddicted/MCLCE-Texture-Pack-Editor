@@ -110,7 +110,19 @@ namespace OMI.Formats.Pck
 
         public void CopyTo(PckAsset[] array, int arrayIndex)
         {
-            throw new NotImplementedException();
+            _ = array ?? throw new ArgumentNullException(nameof(array));
+
+            if (arrayIndex < 0)
+                throw new ArgumentOutOfRangeException(nameof(arrayIndex));
+
+            if (array.Length - arrayIndex < _files.Count)
+                throw new ArgumentException("Destination array is not large enough.", nameof(array));
+
+            int i = arrayIndex;
+            foreach (PckAsset asset in _files.Values)
+            {
+                array[i++] = asset;
+            }
         }
 
         public IEnumerator<PckAsset> GetEnumerator()

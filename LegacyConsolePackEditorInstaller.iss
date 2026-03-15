@@ -1,27 +1,48 @@
 #define MyAppName "MC LCE TP Editor"
-#define MyAppVersion "0.1"
-#define MySourceDir "C:\Users\{user}\minecraft-legacy-editor\LegacyConsolePackEditor\bin\Release\net8.0-windows"
+#define MyAppVersion "0.3"
+#define MyAppExeName "LegacyConsolePackEditor.exe"
+#define MySourceDir "C:\Users\eolia\minecraft-legacy-editor\LegacyConsolePackEditor\bin\Release\net8.0-windows"
 
 [Setup]
+AppId={{C8E7B3C2-4D3F-4B6A-9A1B-9F9D11B0A001}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-DefaultDirName={pf}\{#MyAppName}
+
+AppPublisher=TNT_addict
+AppPublisherURL=https://github.com/TNTaddicted
+AppSupportURL=https://github.com/TNTaddicted/MCLCE-Texture-Pack-Editor
+AppUpdatesURL=https://github.com/TNTaddicted/MCLCE-Texture-Pack-Editor/releases
+
+DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
-Compression=lzma
-SolidCompression=yes
+
 OutputDir=.
 OutputBaseFilename=LegacyConsolePackEditor-Setup
+
+Compression=lzma
+SolidCompression=yes
+
+SetupIconFile=Cactus_1.13.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
+
+WizardStyle=modern
+WizardSmallImageFile=Cactus_1.13.png
+
+DisableProgramGroupPage=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Files]
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
-Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs promptifolder
+[Files]
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\LegacyConsolePackEditor.exe"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\LegacyConsolePackEditor.exe"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent

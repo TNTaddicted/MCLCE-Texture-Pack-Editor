@@ -5,10 +5,12 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
-using System.Runtime.InteropServices;
+using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using OMI;
 using OMI.Formats.Archive;
 using OMI.Formats.Pck;
@@ -37,47 +39,52 @@ namespace LegacyConsolePackEditor
             Hand
         }
 
-        private const int GWL_STYLE = -16;
-        private const int WS_CHILD = 0x40000000;
-        private const int WS_BORDER = 0x00800000;
-        private const int WS_DLGFRAME = 0x00400000;
+        private enum ThemeMode
+        {
+            Dark,
+            Light
+        }
 
-        private static readonly Color SurfaceColor = Color.FromArgb(247, 247, 244);
-        private static readonly Color SurfaceAltColor = Color.FromArgb(232, 233, 227);
-        private static readonly Color ForegroundColor = Color.FromArgb(34, 38, 44);
-        private static readonly Color BorderColor = Color.FromArgb(182, 188, 198);
-        private static readonly Color AccentColor = Color.FromArgb(52, 120, 96);
+        private sealed record ThemePalette(
+            Color Background,
+            Color Surface,
+            Color SurfaceAlt,
+            Color Panel,
+            Color Foreground,
+            Color ForegroundMuted,
+            Color Border,
+            Color Accent,
+            Color AccentText,
+            Color PreviewBackground,
+            Color MenuHover,
+            Color TabInactive,
+            Color StatusBackground);
 
-        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        private static readonly Dictionary<string, Color> AccentPresets = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Teal"] = Color.FromArgb(46, 183, 163),
+            ["Blue"] = Color.FromArgb(64, 142, 255),
+            ["Green"] = Color.FromArgb(72, 173, 92),
+            ["Red"] = Color.FromArgb(230, 82, 82),
+            ["Orange"] = Color.FromArgb(246, 145, 47),
+            ["Pink"] = Color.FromArgb(230, 94, 156)
+        };
 
-        [DllImport("user32.dll")]
-        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindowVisible(IntPtr hWnd);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool MoveWindow(IntPtr hWnd, int x, int y, int nWidth, int nHeight, bool bRepaint);
+        private const int MaxRecentPaths = 10;
 
         private readonly ARCFileReader _arcReader = new();
         private readonly PckFileReader _pckReader = new(ByteOrder.BigEndian);
         private readonly Settings _settings;
+        private ThemeMode _themeMode = ThemeMode.Dark;
+        private string _accentName = "Teal";
+        private ThemePalette _theme = null!;
 
+        private ToolStripMenuItem? _settingsMenuItem;
+        private ToolStripMenuItem? _settingsDarkModeItem;
+        private ToolStripMenuItem? _settingsLightModeItem;
+        private readonly Dictionary<string, ToolStripMenuItem> _accentMenuItems = new(StringComparer.OrdinalIgnoreCase);
+
+        private const string WorkspaceArcRootTag = "__workspace_arc_root__";
         private const string WorkspacePcksRootTag = "__workspace_pcks_root__";
         private const string WorkspacePckTagPrefix = "__workspace_pck__|";
 
@@ -95,10 +102,22 @@ namespace LegacyConsolePackEditor
         private DateTime _lastSwfSyncRequestUtc;
         private FileSystemWatcher? _pckTempWatcher;
         private FileSystemWatcher? _swfTempWatcher;
-        private Process? _swfEditorProcess;
-        private IntPtr _swfEditorHandle = IntPtr.Zero;
-        private System.Windows.Forms.Timer? _swfEmbedMonitorTimer;
-        private bool _embedSwfEditor;
+        private SwfBitmapDocument? _activeSwfDocument;
+        private string? _activeSwfPath;
+        private string? _activeSwfDisplayName;
+        private ListView? _listViewSwfAssets;
+        private PictureBox? _pictureBoxSwfPreview;
+        private Label? _labelSwfInfo;
+        private SplitContainer? _swfSplit;
+        private Panel? _swfPreviewPanel;
+        private string? _activeTemplateExtractPath;
+        private bool _activeTemplateDirty;
+
+        private Color SurfaceColor => _theme.Surface;
+        private Color SurfaceAltColor => _theme.SurfaceAlt;
+        private Color ForegroundColor => _theme.Foreground;
+        private Color BorderColor => _theme.Border;
+        private Color AccentColor => _theme.Accent;
 
         private sealed class WorkspacePckContext
         {
@@ -106,25 +125,46 @@ namespace LegacyConsolePackEditor
             public required PckFile File { get; init; }
         }
 
+        private sealed record ArchiveTreePckAsset(PckAsset Asset, string PckPath);
+
         public Form1()
         {
             _settings = Settings.Load();
+            _accentName = AccentPresets.ContainsKey(_settings.AccentName ?? string.Empty) ? _settings.AccentName! : "Teal";
+            _themeMode = string.Equals(_settings.ThemeMode, "Light", StringComparison.OrdinalIgnoreCase)
+                ? ThemeMode.Light
+                : ThemeMode.Dark;
+            _theme = BuildThemePalette(_themeMode, AccentPresets[_accentName]);
 
             InitializeComponent();
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            InitializeSettingsMenu();
             ConfigureListAndTreeViews();
-            _embedSwfEditor = embedSwfEditorToolStripMenuItem.Checked;
-            UpdateWindowTitle(null);
+            ConfigureSwfEditorSurface();
+            InitializeStudioChrome();
+            InitializeHomeScreen();
+            ApplyTheme();
+            ShowHomeScreen();
 
-            // Keep embedded editor host in sync when the tab is resized.
-            panelSwfHost.Resize += (s, e) => ResizeEmbeddedEditor();
+            embedSwfEditorToolStripMenuItem.Checked = true;
+            embedSwfEditorToolStripMenuItem.Enabled = false;
+            RefreshRecentItemsMenu();
+            RefreshTemplateMenuState();
+            UpdateWindowTitle(null);
+            Shown += (s, e) => ShowHomeScreen();
+            Load += (s, e) => ShowHomeScreen();
         }
 
         private void ConfigureListAndTreeViews()
         {
             listViewPckAssets.View = View.Details;
             listViewPckAssets.FullRowSelect = true;
-            listViewPckAssets.GridLines = true;
+            listViewPckAssets.HideSelection = false;
+            listViewPckAssets.GridLines = false; // use custom separator drawing instead of default white grid lines
             listViewPckAssets.MultiSelect = false;
+            listViewPckAssets.BorderStyle = BorderStyle.None;
+            listViewPckAssets.BackColor = _theme.Surface;
+            listViewPckAssets.ForeColor = _theme.Foreground;
 
             if (listViewPckAssets.Columns.Count == 0)
             {
@@ -134,18 +174,800 @@ namespace LegacyConsolePackEditor
             }
         }
 
+        private void ConfigureSwfEditorSurface()
+        {
+            panelSwfHost.Controls.Clear();
+            panelSwfHost.Visible = true;
+            panelSwfHost.BackColor = SurfaceColor;
+            panelSwfHost.Padding = new Padding(10);
+
+            var split = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                SplitterDistance = 280,
+                BackColor = SurfaceColor
+            };
+            _swfSplit = split;
+
+            _listViewSwfAssets = new ListView
+            {
+                Dock = DockStyle.Fill,
+                View = View.Details,
+                FullRowSelect = true,
+                GridLines = true,
+                MultiSelect = false,
+                HideSelection = false,
+                Sorting = SortOrder.Ascending
+            };
+            _listViewSwfAssets.Columns.Add("Bitmap", 180);
+            _listViewSwfAssets.Columns.Add("Size", 90, HorizontalAlignment.Right);
+            _listViewSwfAssets.Columns.Add("Type", 90);
+            _listViewSwfAssets.SelectedIndexChanged += listViewSwfAssets_SelectedIndexChanged;
+            _listViewSwfAssets.MouseDoubleClick += listViewSwfAssets_MouseDoubleClick;
+
+            var previewPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = SurfaceColor
+            };
+            _swfPreviewPanel = previewPanel;
+
+            _pictureBoxSwfPreview = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = _theme.PreviewBackground,
+                BorderStyle = BorderStyle.FixedSingle,
+                SizeMode = PictureBoxSizeMode.Normal
+            };
+            _pictureBoxSwfPreview.Paint += PictureBoxSwfPreview_Paint;
+            _pictureBoxSwfPreview.Resize += (s, e) => _pictureBoxSwfPreview.Invalidate();
+
+            _labelSwfInfo = new Label
+            {
+                Dock = DockStyle.Bottom,
+                Height = 44,
+                Padding = new Padding(8, 6, 8, 6),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Text = "Open an SWF to inspect embedded bitmaps.",
+                BackColor = SurfaceAltColor,
+                ForeColor = ForegroundColor
+            };
+
+            previewPanel.Controls.Add(_pictureBoxSwfPreview);
+            previewPanel.Controls.Add(_labelSwfInfo);
+
+            split.Panel1.Controls.Add(_listViewSwfAssets);
+            split.Panel2.Controls.Add(previewPanel);
+            panelSwfHost.Controls.Add(split);
+
+            toolStripButtonSwfCapture.Text = "Edit Bitmap";
+            toolStripButtonSwfCapture.Enabled = false;
+        }
+
+        private void InitializeStudioChrome()
+        {
+            splitContainer1.SplitterWidth = 6;
+            splitContainerPckRight.SplitterWidth = 6;
+
+            treeViewArchive.HideSelection = false;
+            treeViewArchive.DrawMode = TreeViewDrawMode.OwnerDrawText;
+            treeViewArchive.DrawNode -= treeViewArchive_DrawNode;
+            treeViewArchive.DrawNode += treeViewArchive_DrawNode;
+
+            ConfigureStudioListView(listViewPckAssets);
+            if (_listViewSwfAssets != null)
+                ConfigureStudioListView(_listViewSwfAssets);
+        }
+
+        private void ConfigureStudioListView(ListView list)
+        {
+            EnableDoubleBuffering(list);
+            list.HotTracking = false;
+
+            list.OwnerDraw = true;
+            list.DrawColumnHeader -= StudioList_DrawColumnHeader;
+            list.DrawItem -= StudioList_DrawItem;
+            list.DrawSubItem -= StudioList_DrawSubItem;
+            list.DrawColumnHeader += StudioList_DrawColumnHeader;
+            list.DrawItem += StudioList_DrawItem;
+            list.DrawSubItem += StudioList_DrawSubItem;
+
+            list.MouseMove -= ListView_MouseMoveInvalidate;
+            list.MouseLeave -= ListView_MouseLeaveInvalidate;
+            list.MouseMove += ListView_MouseMoveInvalidate;
+            list.MouseLeave += ListView_MouseLeaveInvalidate;
+        }
+
+        private static void ListView_MouseMoveInvalidate(object? sender, MouseEventArgs e)
+        {
+            if (sender is ListView list)
+                list.Invalidate();
+        }
+
+        private static void ListView_MouseLeaveInvalidate(object? sender, EventArgs e)
+        {
+            if (sender is ListView list)
+                list.Invalidate();
+        }
+
+        private static void EnableDoubleBuffering(Control control)
+        {
+            typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?.SetValue(control, true);
+        }
+
+        private void listViewSwfAssets_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            UpdateSwfPreview();
+        }
+
+        private void listViewSwfAssets_MouseDoubleClick(object? sender, MouseEventArgs e)
+        {
+            OpenSelectedSwfBitmap();
+        }
+
+        private void UpdateSwfPreview()
+        {
+            if (_pictureBoxSwfPreview == null || _labelSwfInfo == null || _listViewSwfAssets == null)
+                return;
+
+            if (_listViewSwfAssets.SelectedItems.Count != 1 || _listViewSwfAssets.SelectedItems[0].Tag is not SwfBitmapEntry entry)
+            {
+                _pictureBoxSwfPreview.Image = null;
+                _labelSwfInfo.Text = string.IsNullOrWhiteSpace(_activeSwfDisplayName)
+                    ? "Open an SWF to inspect embedded bitmaps."
+                    : $"{_activeSwfDisplayName}: select an embedded bitmap to preview and edit it.";
+                toolStripButtonSwfCapture.Enabled = false;
+                return;
+            }
+
+            _pictureBoxSwfPreview.Image = entry.Bitmap;
+            _labelSwfInfo.Text = $"Character {entry.CharacterId} • {entry.Name} • {entry.Width}x{entry.Height}";
+            toolStripButtonSwfCapture.Enabled = true;
+        }
+
+        private void PopulateSwfEditor(SwfBitmapDocument document, string displayName)
+        {
+            if (_listViewSwfAssets == null)
+                return;
+
+            _activeSwfDisplayName = displayName;
+            _listViewSwfAssets.BeginUpdate();
+            _listViewSwfAssets.Items.Clear();
+
+            foreach (SwfBitmapEntry bitmap in document.Bitmaps.OrderBy(item => item.CharacterId))
+            {
+                var item = new ListViewItem(bitmap.Name)
+                {
+                    Tag = bitmap
+                };
+                item.SubItems.Add($"{bitmap.Width}x{bitmap.Height}");
+                item.SubItems.Add(bitmap.Encoding.ToString());
+                _listViewSwfAssets.Items.Add(item);
+            }
+
+            _listViewSwfAssets.EndUpdate();
+            if (_listViewSwfAssets.Items.Count > 0)
+                _listViewSwfAssets.Items[0].Selected = true;
+
+            UpdateSwfPreview();
+        }
+
+        private void ClearSwfEditor(string message)
+        {
+            _activeSwfDocument?.Dispose();
+            _activeSwfDocument = null;
+            _activeSwfPath = null;
+            _activeSwfDisplayName = null;
+
+            if (_listViewSwfAssets != null)
+                _listViewSwfAssets.Items.Clear();
+
+            if (_pictureBoxSwfPreview != null)
+                _pictureBoxSwfPreview.Image = null;
+
+            if (_labelSwfInfo != null)
+                _labelSwfInfo.Text = message;
+
+            toolStripButtonSwfCapture.Enabled = false;
+        }
+
         private void UpdateWindowTitle(string? fileName)
         {
-            string suffix = "Legacy Console Pack Editor";
+            string suffix = "MCLCE Texture Pack Editor";
             Text = string.IsNullOrWhiteSpace(fileName) ? suffix : $"{fileName} - {suffix}";
         }
 
         private static Font CreateFriendlyFont(float size, FontStyle style = FontStyle.Regular)
         {
-            return new Font("Segoe UI", size, style, GraphicsUnit.Point);
+            return new Font("Bahnschrift", size, style, GraphicsUnit.Point);
+        }
+
+        private void InitializeSettingsMenu()
+        {
+            _settingsMenuItem = new ToolStripMenuItem("&Settings");
+
+            var themeMenu = new ToolStripMenuItem("Theme");
+            _settingsDarkModeItem = new ToolStripMenuItem("Dark") { CheckOnClick = true };
+            _settingsLightModeItem = new ToolStripMenuItem("Light") { CheckOnClick = true };
+            _settingsDarkModeItem.Click += (_, _) => SetThemeMode(ThemeMode.Dark);
+            _settingsLightModeItem.Click += (_, _) => SetThemeMode(ThemeMode.Light);
+            themeMenu.DropDownItems.AddRange(new ToolStripItem[] { _settingsDarkModeItem, _settingsLightModeItem });
+
+            var accentMenu = new ToolStripMenuItem("Accent Color");
+            foreach ((string name, _) in AccentPresets)
+            {
+                var item = new ToolStripMenuItem(name) { CheckOnClick = true };
+                item.Click += (_, _) => SetAccent(name);
+                _accentMenuItems[name] = item;
+                accentMenu.DropDownItems.Add(item);
+            }
+
+            _settingsMenuItem.DropDownItems.AddRange(new ToolStripItem[] { themeMenu, accentMenu });
+
+            int exitIndex = fileToolStripMenuItem.DropDownItems.IndexOf(exitToolStripMenuItem);
+            if (exitIndex >= 0)
+            {
+                fileToolStripMenuItem.DropDownItems.Insert(exitIndex, new ToolStripSeparator());
+                fileToolStripMenuItem.DropDownItems.Insert(exitIndex, _settingsMenuItem);
+            }
+            else
+            {
+                fileToolStripMenuItem.DropDownItems.Add(_settingsMenuItem);
+            }
+
+            UpdateThemeMenuChecks();
+        }
+
+        private void SetThemeMode(ThemeMode mode)
+        {
+            if (_themeMode == mode)
+                return;
+
+            _themeMode = mode;
+            _theme = BuildThemePalette(_themeMode, AccentPresets[_accentName]);
+            _settings.ThemeMode = mode.ToString();
+            _settings.Save();
+            UpdateThemeMenuChecks();
+            ApplyTheme();
+        }
+
+        private void SetAccent(string accentName)
+        {
+            if (!AccentPresets.ContainsKey(accentName) || string.Equals(_accentName, accentName, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _accentName = accentName;
+            _theme = BuildThemePalette(_themeMode, AccentPresets[_accentName]);
+            _settings.AccentName = _accentName;
+            _settings.Save();
+            UpdateThemeMenuChecks();
+            ApplyTheme();
+        }
+
+        private void UpdateThemeMenuChecks()
+        {
+            if (_settingsDarkModeItem != null)
+                _settingsDarkModeItem.Checked = _themeMode == ThemeMode.Dark;
+            if (_settingsLightModeItem != null)
+                _settingsLightModeItem.Checked = _themeMode == ThemeMode.Light;
+
+            foreach ((string name, ToolStripMenuItem item) in _accentMenuItems)
+                item.Checked = string.Equals(name, _accentName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static ThemePalette BuildThemePalette(ThemeMode mode, Color accent)
+        {
+            if (mode == ThemeMode.Light)
+            {
+                return new ThemePalette(
+                    Background: Color.FromArgb(239, 241, 245),
+                    Surface: Color.FromArgb(252, 253, 255),
+                    SurfaceAlt: Color.FromArgb(232, 236, 243),
+                    Panel: Color.FromArgb(245, 248, 251),
+                    Foreground: Color.FromArgb(34, 39, 50),
+                    ForegroundMuted: Color.FromArgb(92, 101, 117),
+                    Border: Color.FromArgb(189, 199, 214),
+                    Accent: accent,
+                    AccentText: Color.White,
+                        PreviewBackground: Color.FromArgb(245, 248, 251),
+                    MenuHover: ControlPaint.Light(accent, 0.58f),
+                    TabInactive: Color.FromArgb(226, 231, 239),
+                    StatusBackground: Color.FromArgb(228, 234, 244));
+            }
+
+            return new ThemePalette(
+                Background: Color.FromArgb(23, 25, 30),
+                Surface: Color.FromArgb(31, 34, 41),
+                SurfaceAlt: Color.FromArgb(39, 43, 52),
+                Panel: Color.FromArgb(26, 29, 36),
+                Foreground: Color.FromArgb(232, 236, 243),
+                ForegroundMuted: Color.FromArgb(165, 173, 187),
+                Border: Color.FromArgb(68, 76, 92),
+                Accent: accent,
+                AccentText: Color.White,
+                PreviewBackground: Color.FromArgb(26, 29, 36),
+                MenuHover: ControlPaint.Light(accent, 0.30f),
+                TabInactive: Color.FromArgb(34, 37, 45),
+                StatusBackground: Color.FromArgb(20, 23, 28));
+        }
+
+        private void ApplyTheme()
+        {
+            SuspendLayout();
+            try
+            {
+                Font = CreateFriendlyFont(9.25f, FontStyle.Regular);
+                BackColor = _theme.Background;
+                ForeColor = _theme.Foreground;
+
+                menuStrip1.RenderMode = ToolStripRenderMode.Professional;
+                menuStrip1.Renderer = new StudioToolStripRenderer(_theme);
+                menuStrip1.BackColor = _theme.SurfaceAlt;
+                menuStrip1.ForeColor = _theme.Foreground;
+
+                toolStripPck.RenderMode = ToolStripRenderMode.Professional;
+                toolStripPck.Renderer = new StudioToolStripRenderer(_theme);
+                toolStripPck.BackColor = _theme.SurfaceAlt;
+                toolStripPck.ForeColor = _theme.Foreground;
+                toolStripSwf.RenderMode = ToolStripRenderMode.Professional;
+                toolStripSwf.Renderer = new StudioToolStripRenderer(_theme);
+                toolStripSwf.BackColor = _theme.SurfaceAlt;
+                toolStripSwf.ForeColor = _theme.Foreground;
+
+                // Ensure buttons don't show white backgrounds
+                foreach (ToolStripItem item in toolStripPck.Items)
+                {
+                    item.BackColor = _theme.SurfaceAlt;
+                    item.ForeColor = _theme.Foreground;
+                }
+                foreach (ToolStripItem item in toolStripSwf.Items)
+                {
+                    item.BackColor = _theme.SurfaceAlt;
+                    item.ForeColor = _theme.Foreground;
+                }
+
+                contextMenuTreeView.RenderMode = ToolStripRenderMode.Professional;
+                contextMenuTreeView.Renderer = new StudioToolStripRenderer(_theme);
+
+                tabPagePck.UseVisualStyleBackColor = false;
+                tabPageSwfEditor.UseVisualStyleBackColor = false;
+                tabPagePck.BackColor = _theme.Surface;
+                tabPageSwfEditor.BackColor = _theme.Surface;
+
+                tabControlMain.DrawMode = TabDrawMode.OwnerDrawFixed;
+                tabControlMain.ItemSize = new Size(148, 30);
+                tabControlMain.Padding = new Point(16, 4);
+                tabControlMain.DrawItem -= tabControlMain_DrawItem;
+                tabControlMain.DrawItem += tabControlMain_DrawItem;
+
+                if (_listViewSwfAssets != null)
+                    ConfigureStudioListView(_listViewSwfAssets);
+                ConfigureStudioListView(listViewPckAssets);
+
+                treeViewArchive.Invalidate();
+                listViewPckAssets.Invalidate();
+                _listViewSwfAssets?.Invalidate();
+
+                ApplyThemeRecursive(this);
+
+                panelSwfHost.BackColor = _theme.Panel;
+                if (_swfSplit != null)
+                {
+                    _swfSplit.BackColor = _theme.Panel;
+                    _swfSplit.Panel1.BackColor = _theme.Panel;
+                    _swfSplit.Panel2.BackColor = _theme.Panel;
+                }
+                if (_swfPreviewPanel != null)
+                    _swfPreviewPanel.BackColor = _theme.Panel;
+
+                pictureBoxPckPreview.BackColor = _theme.PreviewBackground;
+                if (_pictureBoxSwfPreview != null)
+                    _pictureBoxSwfPreview.BackColor = _theme.PreviewBackground;
+
+                panelHome.Invalidate();
+                if (_pictureBoxSwfPreview != null)
+                    _pictureBoxSwfPreview.Invalidate();
+                pictureBoxPckPreview.Invalidate();
+            }
+            finally
+            {
+                ResumeLayout(true);
+            }
+        }
+
+        private void ApplyThemeRecursive(Control root)
+        {
+            switch (root)
+            {
+                case Form:
+                    root.BackColor = _theme.Background;
+                    root.ForeColor = _theme.Foreground;
+                    break;
+                case TabPage tabPage:
+                    tabPage.BackColor = _theme.Surface;
+                    tabPage.ForeColor = _theme.Foreground;
+                    break;
+                case TableLayoutPanel:
+                    root.BackColor = Color.Transparent;
+                    root.ForeColor = _theme.Foreground;
+                    break;
+                case StatusStrip:
+                    root.BackColor = _theme.StatusBackground;
+                    root.ForeColor = _theme.Foreground;
+                    break;
+                case MenuStrip:
+                case ToolStrip:
+                    root.BackColor = _theme.SurfaceAlt;
+                    root.ForeColor = _theme.Foreground;
+                    break;
+                case Panel:
+                case SplitContainer:
+                    root.BackColor = _theme.Panel;
+                    root.ForeColor = _theme.Foreground;
+                    break;
+                case Label:
+                    root.BackColor = root == labelPckInfo || root == _labelSwfInfo ? _theme.SurfaceAlt : Color.Transparent;
+                    root.ForeColor = root == labelHomeMessage ? _theme.ForegroundMuted : _theme.Foreground;
+                    break;
+                case TreeView treeView:
+                    treeView.BackColor = _theme.Surface;
+                    treeView.ForeColor = _theme.Foreground;
+                    treeView.BorderStyle = BorderStyle.FixedSingle;
+                    treeView.LineColor = _theme.Border;
+                    break;
+                case ListView listView:
+                    listView.BackColor = _theme.Surface;
+                    listView.ForeColor = _theme.Foreground;
+                    listView.BorderStyle = BorderStyle.FixedSingle;
+                    break;
+                case PictureBox picture:
+                    if (picture == pictureBoxPckPreview || picture == _pictureBoxSwfPreview)
+                    {
+                        picture.BackColor = _theme.PreviewBackground;
+                        picture.BorderStyle = BorderStyle.FixedSingle;
+                    }
+                    else
+                    {
+                        picture.BackColor = Color.Transparent;
+                    }
+                    break;
+            }
+
+            foreach (Control child in root.Controls)
+                ApplyThemeRecursive(child);
+        }
+
+        private void tabControlMain_DrawItem(object? sender, DrawItemEventArgs e)
+        {
+            if (sender is not TabControl tabs)
+                return;
+
+            bool selected = e.Index == tabs.SelectedIndex;
+            Rectangle rect = Rectangle.Inflate(e.Bounds, -4, -3);
+            using var path = CreateRoundedRectPath(rect, 8);
+            using var bg = new SolidBrush(selected ? _theme.Accent : _theme.TabInactive);
+            using var border = new Pen(selected ? ControlPaint.Light(_theme.Accent, 0.08f) : _theme.Border);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.FillPath(bg, path);
+            e.Graphics.DrawPath(border, path);
+            TextRenderer.DrawText(
+                e.Graphics,
+                tabs.TabPages[e.Index].Text,
+                CreateFriendlyFont(9.25f, selected ? FontStyle.Bold : FontStyle.Regular),
+                rect,
+                selected ? _theme.AccentText : _theme.Foreground,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+
+        private void treeViewArchive_DrawNode(object? sender, DrawTreeNodeEventArgs e)
+        {
+            if (e.Node == null)
+                return;
+
+            bool selected = (e.State & TreeNodeStates.Selected) == TreeNodeStates.Selected;
+            Rectangle bounds = new Rectangle(e.Bounds.X - 2, e.Bounds.Y, treeViewArchive.ClientSize.Width - e.Bounds.X + 2, e.Bounds.Height);
+
+            Color bg = selected ? _theme.Accent : _theme.Surface;
+            Color fg = selected ? _theme.AccentText : _theme.Foreground;
+
+            using var backgroundBrush = new SolidBrush(bg);
+            using var textBrush = new SolidBrush(fg);
+
+            e.Graphics.FillRectangle(backgroundBrush, bounds);
+            TextRenderer.DrawText(e.Graphics, e.Node.Text, CreateFriendlyFont(9f, selected ? FontStyle.Bold : FontStyle.Regular), e.Bounds, fg, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+
+        private void StudioList_DrawColumnHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
+        {
+            using var bg = new SolidBrush(_theme.SurfaceAlt);
+            using var border = new Pen(_theme.Border);
+            string headerText = e.Header?.Text ?? string.Empty;
+
+            e.Graphics.FillRectangle(bg, e.Bounds);
+            e.Graphics.DrawLine(border, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+            TextRenderer.DrawText(e.Graphics, headerText, CreateFriendlyFont(9f, FontStyle.Bold), e.Bounds, _theme.Foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.LeftAndRightPadding);
+        }
+
+        private void StudioList_DrawItem(object? sender, DrawListViewItemEventArgs e)
+        {
+            bool selected = e.Item.Selected;
+            bool focused = e.Item.Focused && e.Item.ListView?.Focused == true;
+            bool odd = (e.ItemIndex % 2) == 1;
+            Color rowColor = odd ? _theme.Surface : _theme.Panel;
+
+            Color bg;
+            if (!selected)
+            {
+                bg = rowColor;
+            }
+            else if (focused)
+            {
+                bg = _theme.Accent;
+            }
+            else
+            {
+                bg = ControlPaint.Light(_theme.Surface, 0.1f);
+            }
+
+            using var bgBrush = new SolidBrush(bg);
+            e.Graphics.FillRectangle(bgBrush, e.Bounds);
+
+            using var separator = new Pen(_theme.Border);
+            e.Graphics.DrawLine(separator, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+
+            e.DrawDefault = false;
+        }
+
+        private void StudioList_DrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
+        {
+            bool selected = e.Item.Selected;
+            bool focused = e.Item.Focused && e.Item.ListView?.Focused == true;
+            bool odd = (e.ItemIndex % 2) == 1;
+            Color rowColor = odd ? _theme.Surface : _theme.Panel;
+
+            Color bg;
+            Color fg = _theme.Foreground;
+            if (!selected)
+            {
+                bg = rowColor;
+            }
+            else if (focused)
+            {
+                bg = _theme.Accent;
+                fg = _theme.AccentText;
+            }
+            else
+            {
+                bg = ControlPaint.Light(_theme.Surface, 0.1f);
+            }
+
+            HorizontalAlignment align = e.Header?.TextAlign ?? HorizontalAlignment.Left;
+            string subItemText = e.SubItem?.Text ?? string.Empty;
+
+            using var bgBrush = new SolidBrush(bg);
+            e.Graphics.FillRectangle(bgBrush, e.Bounds);
+
+            using var separator = new Pen(_theme.Border);
+            e.Graphics.DrawLine(separator, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+
+            TextFormatFlags flags = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.LeftAndRightPadding;
+            if (align == HorizontalAlignment.Right)
+                flags |= TextFormatFlags.Right;
+            else
+                flags |= TextFormatFlags.Left;
+
+            TextRenderer.DrawText(e.Graphics, subItemText, CreateFriendlyFont(9f, selected ? FontStyle.Bold : FontStyle.Regular), e.Bounds, fg, flags);
+            e.DrawDefault = false;
+        }
+
+        private static GraphicsPath CreateRoundedRectPath(Rectangle rect, int radius)
+        {
+            int diameter = radius * 2;
+            var path = new GraphicsPath();
+            path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
+            path.AddArc(rect.Right - diameter, rect.Y, diameter, diameter, 270, 90);
+            path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(rect.X, rect.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        private sealed class StudioToolStripRenderer : ToolStripProfessionalRenderer
+        {
+            private readonly ThemePalette _theme;
+
+            public StudioToolStripRenderer(ThemePalette theme) : base(new StudioColorTable(theme))
+            {
+                _theme = theme;
+                RoundedEdges = false;
+            }
+
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                e.TextColor = e.Item.Selected ? _theme.AccentText : _theme.Foreground;
+                base.OnRenderItemText(e);
+            }
+
+            protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e)
+            {
+                if (e.Item is ToolStripButton btn)
+                {
+                    Rectangle rect = new Rectangle(Point.Empty, btn.Size);
+                    using var fill = new SolidBrush(btn.Pressed || btn.Selected ? _theme.Accent : _theme.SurfaceAlt);
+                    e.Graphics.FillRectangle(fill, rect);
+                    using var border = new Pen(_theme.Border);
+                    e.Graphics.DrawRectangle(border, 0, 0, rect.Width - 1, rect.Height - 1);
+                }
+                else
+                {
+                    base.OnRenderButtonBackground(e);
+                }
+            }
+
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+            {
+                using var border = new Pen(_theme.Border);
+                e.Graphics.DrawLine(border, 0, 0, e.ToolStrip.Width, 0);
+            }
+        }
+
+        private sealed class StudioColorTable : ProfessionalColorTable
+        {
+            private readonly ThemePalette _theme;
+
+            public StudioColorTable(ThemePalette theme)
+            {
+                _theme = theme;
+                UseSystemColors = false;
+            }
+
+            public override Color MenuItemSelected => _theme.Accent;
+            public override Color MenuItemBorder => _theme.Border;
+            public override Color MenuItemSelectedGradientBegin => _theme.MenuHover;
+            public override Color MenuItemSelectedGradientEnd => _theme.MenuHover;
+            public override Color MenuItemPressedGradientBegin => _theme.Accent;
+            public override Color MenuItemPressedGradientMiddle => _theme.Accent;
+            public override Color MenuItemPressedGradientEnd => _theme.Accent;
+            public override Color ToolStripDropDownBackground => _theme.Surface;
+            public override Color ImageMarginGradientBegin => _theme.Surface;
+            public override Color ImageMarginGradientMiddle => _theme.Surface;
+            public override Color ImageMarginGradientEnd => _theme.Surface;
+            public override Color SeparatorDark => _theme.Border;
+            public override Color SeparatorLight => _theme.Border;
+            public override Color ToolStripBorder => _theme.Border;
+            public override Color MenuBorder => _theme.Border;
+            public override Color StatusStripGradientBegin => _theme.StatusBackground;
+            public override Color StatusStripGradientEnd => _theme.StatusBackground;
+            public override Color ToolStripGradientBegin => _theme.SurfaceAlt;
+            public override Color ToolStripGradientMiddle => _theme.SurfaceAlt;
+            public override Color ToolStripGradientEnd => _theme.SurfaceAlt;
+            public override Color ButtonSelectedHighlight => _theme.Accent;
+            public override Color ButtonSelectedHighlightBorder => _theme.Accent;
+            public override Color ButtonPressedGradientBegin => _theme.Accent;
+            public override Color ButtonPressedGradientMiddle => _theme.Accent;
+            public override Color ButtonPressedGradientEnd => _theme.Accent;
+        }
+
+        private void InitializeHomeScreen()
+        {
+            pictureBoxHomeLogo.Image = null;
+            panelHome.Paint -= panelHome_Paint;
+            panelHome.Paint += panelHome_Paint;
+
+            bool loaded = false;
+            try
+            {
+                loaded = TryLoadLogoFromResource();
+            }
+            catch
+            {
+                // Ignore; we'll fall back to disk.
+            }
+
+            if (!loaded)
+            {
+                try
+                {
+                    TryLoadLogoFromDisk();
+                }
+                catch
+                {
+                    // Ignore; home screen can still show without an image.
+                }
+            }
+        }
+
+        private bool TryLoadLogoFromResource()
+        {
+            try
+            {
+                var assembly = typeof(Form1).Assembly;
+                string? resourceName = assembly.GetManifestResourceNames()
+                    .FirstOrDefault(name => name.EndsWith("minecraft_title.png", StringComparison.OrdinalIgnoreCase));
+
+                if (string.IsNullOrEmpty(resourceName))
+                    return false;
+
+                using var stream = assembly.GetManifestResourceStream(resourceName);
+                if (stream == null)
+                    return false;
+
+                pictureBoxHomeLogo.Image = Image.FromStream(stream);
+                return true;
+            }
+            catch
+            {
+                // Ignore; fall back to disk version if available.
+                return false;
+            }
+        }
+
+        private void TryLoadLogoFromDisk()
+        {
+            string diskPath = Path.Combine(AppContext.BaseDirectory, "minecraft_title.png");
+            if (!File.Exists(diskPath))
+                return;
+
+            using var stream = File.OpenRead(diskPath);
+            pictureBoxHomeLogo.Image = Image.FromStream(stream);
         }
 
         private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+        private void PictureBoxPckPreview_Paint(object? sender, PaintEventArgs e)
+        {
+            e.Graphics.Clear(_theme.PreviewBackground);
+
+            if (pictureBoxPckPreview.Image == null)
+                return;
+
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            e.Graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+            e.Graphics.CompositingQuality = CompositingQuality.HighSpeed;
+            e.Graphics.SmoothingMode = SmoothingMode.None;
+
+            Rectangle destRect = GetScaledImageRectangle(pictureBoxPckPreview.ClientRectangle, pictureBoxPckPreview.Image.Size);
+            e.Graphics.DrawImage(pictureBoxPckPreview.Image, destRect);
+        }
+
+        private void PictureBoxSwfPreview_Paint(object? sender, PaintEventArgs e)
+        {
+            if (_pictureBoxSwfPreview == null)
+                return;
+
+            e.Graphics.Clear(_pictureBoxSwfPreview.BackColor);
+
+            if (_pictureBoxSwfPreview.Image == null)
+                return;
+
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            e.Graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+            e.Graphics.CompositingQuality = CompositingQuality.HighSpeed;
+            e.Graphics.SmoothingMode = SmoothingMode.None;
+
+            Size imageSize = _pictureBoxSwfPreview.Image.Size;
+            Rectangle destRect = GetScaledImageRectangle(_pictureBoxSwfPreview.ClientRectangle, imageSize);
+            e.Graphics.DrawImage(_pictureBoxSwfPreview.Image, destRect);
+        }
+
+        private static Rectangle GetScaledImageRectangle(Rectangle bounds, Size imageSize)
+        {
+            if (imageSize.Width <= 0 || imageSize.Height <= 0 || bounds.Width <= 0 || bounds.Height <= 0)
+                return Rectangle.Empty;
+
+            float ratioX = (float)bounds.Width / imageSize.Width;
+            float ratioY = (float)bounds.Height / imageSize.Height;
+            float ratio = Math.Min(ratioX, ratioY);
+
+            int width = (int)Math.Round(imageSize.Width * ratio);
+            int height = (int)Math.Round(imageSize.Height * ratio);
+
+            int x = bounds.X + (bounds.Width - width) / 2;
+            int y = bounds.Y + (bounds.Height - height) / 2;
+
+            return new Rectangle(x, y, width, height);
+        }
 
         private static bool WriteUtf8IntoFixedSegment(byte[] buffer, int offset, int capacity, string value)
         {
@@ -536,7 +1358,7 @@ namespace LegacyConsolePackEditor
                 else if (ext == ".pck")
                     LoadPck(path);
                 else if (ext == ".swf")
-                    await OpenSwfFileAsync(path, Path.GetFileName(path));
+                    await OpenSwfFileAsync(path, Path.GetFileName(path), addToRecent: true);
                 else
                     MessageBox.Show(this, $"Unsupported file type: {path}", "Open", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
@@ -550,10 +1372,131 @@ namespace LegacyConsolePackEditor
             LoadWorkspaceFolder(folderBrowserDialog.SelectedPath);
         }
 
+        private void RefreshTemplateMenuState()
+        {
+            string templatesRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCLCE Texture Pack Editor", "Templates");
+            string zipPath = Path.Combine(templatesRoot, "TexturePackTemplate.zip");
+            bool zipExists = File.Exists(zipPath) || (!string.IsNullOrEmpty(_settings.LastTemplateZip) && File.Exists(_settings.LastTemplateZip));
+            downloadTemplateToolStripMenuItem.Visible = !zipExists;
+        }
+
+        private async void downloadTemplateToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            await DownloadAndOpenTemplateAsync();
+            RefreshTemplateMenuState();
+        }
+
+        private async void loadTemplateToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            await LoadTemplateAsync();
+        }
+
+        private void RefreshRecentItemsMenu()
+        {
+            recentItemsToolStripMenuItem.DropDownItems.Clear();
+
+            List<string> validPaths = _settings.RecentPaths
+                .Where(path => !string.IsNullOrWhiteSpace(path) && (File.Exists(path) || Directory.Exists(path)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(MaxRecentPaths)
+                .ToList();
+
+            if (validPaths.Count != _settings.RecentPaths.Count)
+            {
+                _settings.RecentPaths = validPaths;
+                _settings.Save();
+            }
+
+            if (validPaths.Count == 0)
+            {
+                recentItemsToolStripMenuItem.DropDownItems.Add(new ToolStripMenuItem("(empty)") { Enabled = false });
+                return;
+            }
+
+            foreach (string path in validPaths)
+            {
+                string label = Directory.Exists(path)
+                    ? $"Folder: {Path.GetFileName(path)}"
+                    : Path.GetFileName(path);
+
+                var item = new ToolStripMenuItem(label)
+                {
+                    Tag = path,
+                    ToolTipText = path
+                };
+                item.Click += recentItemToolStripMenuItem_Click;
+                recentItemsToolStripMenuItem.DropDownItems.Add(item);
+            }
+
+            recentItemsToolStripMenuItem.DropDownItems.Add(new ToolStripSeparator());
+            var clearItem = new ToolStripMenuItem("Clear Recent");
+            clearItem.Click += clearRecentToolStripMenuItem_Click;
+            recentItemsToolStripMenuItem.DropDownItems.Add(clearItem);
+        }
+
+        private void AddRecentPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            string fullPath = Path.GetFullPath(path);
+            _settings.RecentPaths.RemoveAll(existing => string.Equals(existing, fullPath, StringComparison.OrdinalIgnoreCase));
+            _settings.RecentPaths.Insert(0, fullPath);
+
+            if (_settings.RecentPaths.Count > MaxRecentPaths)
+                _settings.RecentPaths.RemoveRange(MaxRecentPaths, _settings.RecentPaths.Count - MaxRecentPaths);
+
+            _settings.Save();
+            RefreshRecentItemsMenu();
+        }
+
+        private async void recentItemToolStripMenuItem_Click(object? sender, EventArgs e)
+        {
+            if (sender is not ToolStripMenuItem item || item.Tag is not string path)
+                return;
+
+            if (Directory.Exists(path))
+            {
+                LoadWorkspaceFolder(path);
+                return;
+            }
+
+            if (!File.Exists(path))
+            {
+                _settings.RecentPaths.RemoveAll(existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase));
+                _settings.Save();
+                RefreshRecentItemsMenu();
+                MessageBox.Show(this, $"Recent item was not found:\n{path}", "Open Recent", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            if (ext == ".arc")
+                LoadArchive(path);
+            else if (ext == ".pck")
+                LoadPck(path);
+            else if (ext == ".swf")
+                await OpenSwfFileAsync(path, Path.GetFileName(path), addToRecent: true);
+        }
+
+        private void clearRecentToolStripMenuItem_Click(object? sender, EventArgs e)
+        {
+            _settings.RecentPaths.Clear();
+            _settings.Save();
+            RefreshRecentItemsMenu();
+        }
+
         private void LoadWorkspaceFolder(string folderPath)
         {
             try
             {
+                string fullFolderCandidate = Path.GetFullPath(folderPath);
+                if (string.IsNullOrEmpty(_activeTemplateExtractPath) ||
+                    !string.Equals(fullFolderCandidate, _activeTemplateExtractPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    CleanupUnusedTemplateWorkspace();
+                }
+
                 string fullFolder = Path.GetFullPath(folderPath);
                 _workspaceFolderPath = fullFolder;
                 _workspacePcks.Clear();
@@ -612,6 +1555,8 @@ namespace LegacyConsolePackEditor
 
                 UpdateWindowTitle(Path.GetFileName(fullFolder));
                 toolStripStatusLabel1.Text = $"Opened folder {Path.GetFileName(fullFolder)} with {(_archive != null ? 1 : 0)} ARC and {_workspacePcks.Count} PCK file(s).";
+                AddRecentPath(fullFolder);
+                HideHomeScreen();
             }
             catch (Exception ex)
             {
@@ -724,12 +1669,15 @@ namespace LegacyConsolePackEditor
         {
             try
             {
+                CleanupUnusedTemplateWorkspace();
                 _archive = _arcReader.FromFile(path);
                 _archivePath = path;
                 _mode = EditorMode.Arc;
                 BuildArchiveTree();
                 UpdateWindowTitle(Path.GetFileName(path));
                 toolStripStatusLabel1.Text = $"Loaded {_archive.Count} entries from {Path.GetFileName(path)}";
+                AddRecentPath(path);
+                HideHomeScreen();
             }
             catch (Exception ex)
             {
@@ -741,6 +1689,7 @@ namespace LegacyConsolePackEditor
         {
             try
             {
+                CleanupUnusedTemplateWorkspace();
                 _pckFile = _pckReader.FromFile(path);
                 _pckFilePath = path;
                 _workspaceFolderPath = Path.GetDirectoryName(path);
@@ -754,20 +1703,14 @@ namespace LegacyConsolePackEditor
                 PopulatePckAssetList(_pckFile);
                 tabControlMain.SelectedTab = tabPagePck;
 
-                if (_archive == null)
-                {
-                    treeViewArchive.Nodes.Clear();
-                    EnsureWorkspacePckNodes();
-                }
-                else
-                {
-                    EnsureWorkspacePckNodes();
-                }
+                BuildArchiveTree();
 
                 UpdateWindowTitle(Path.GetFileName(path));
                 toolStripStatusLabel1.Text = _archive == null
                     ? $"Loaded PCK: {Path.GetFileName(path)} ({_pckFile.AssetCount} assets)"
                     : $"Loaded standalone PCK alongside ARC: {Path.GetFileName(path)} ({_pckFile.AssetCount} assets)";
+                AddRecentPath(path);
+                HideHomeScreen();
             }
             catch (Exception ex)
             {
@@ -781,10 +1724,22 @@ namespace LegacyConsolePackEditor
             treeViewArchive.Nodes.Clear();
             if (_archive != null)
             {
+                string arcDisplayName = !string.IsNullOrWhiteSpace(_archivePath)
+                    ? Path.GetFileName(_archivePath)
+                    : "Archive.arc";
+
+                var arcRoot = new TreeNode(arcDisplayName)
+                {
+                    Name = WorkspaceArcRootTag,
+                    Tag = WorkspaceArcRootTag
+                };
+
                 foreach (var entry in _archive.OrderBy(kv => kv.Key))
                 {
-                    AddArchiveEntryNode(treeViewArchive.Nodes, entry.Key);
+                    AddArchiveEntryNode(arcRoot.Nodes, entry.Key);
                 }
+
+                treeViewArchive.Nodes.Add(arcRoot);
             }
 
             EnsureWorkspacePckNodes();
@@ -796,32 +1751,82 @@ namespace LegacyConsolePackEditor
             if (_workspacePcks.Count == 0)
                 return;
 
-            TreeNode? root = treeViewArchive.Nodes.Find(WorkspacePcksRootTag, false).FirstOrDefault();
-            if (root == null)
-            {
-                root = new TreeNode("Workspace PCKs")
-                {
-                    Name = WorkspacePcksRootTag,
-                    Tag = WorkspacePcksRootTag
-                };
-                treeViewArchive.Nodes.Add(root);
-            }
-
-            root.Nodes.Clear();
-            foreach (var workspacePck in _workspacePcks.Values.OrderBy(p => Path.GetFileName(p.Path)))
+            foreach (var workspacePck in _workspacePcks.Values.OrderBy(p => p.Path))
             {
                 string relativePath = !string.IsNullOrEmpty(_workspaceFolderPath)
                     ? Path.GetRelativePath(_workspaceFolderPath, workspacePck.Path)
                     : Path.GetFileName(workspacePck.Path);
 
-                root.Nodes.Add(new TreeNode(relativePath)
-                {
-                    Name = GetWorkspacePckNodeTag(workspacePck.Path),
-                    Tag = GetWorkspacePckNodeTag(workspacePck.Path)
-                });
-            }
+                string[] parts = relativePath.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0)
+                    continue;
 
-            root.Expand();
+                // Build/navigate directory nodes that mirror the real folder structure.
+                TreeNodeCollection currentNodes = treeViewArchive.Nodes;
+                string cumulativePath = "";
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    string part = parts[i];
+                    cumulativePath = cumulativePath.Length == 0 ? part : (cumulativePath + "/" + part);
+                    string folderNodeName = "__wsfolder__|" + cumulativePath;
+
+                    TreeNode? dirNode = currentNodes.Cast<TreeNode>()
+                        .FirstOrDefault(n => n.Name == folderNodeName);
+                    if (dirNode == null)
+                    {
+                        dirNode = new TreeNode(part)
+                        {
+                            Name = folderNodeName,
+                            Tag = folderNodeName
+                        };
+                        currentNodes.Add(dirNode);
+                    }
+                    dirNode.Expand();
+                    currentNodes = dirNode.Nodes;
+                }
+
+                string pckName = parts[parts.Length - 1];
+                string pckNodeTag = GetWorkspacePckNodeTag(workspacePck.Path);
+                var pckNode = new TreeNode(pckName)
+                {
+                    Name = pckNodeTag,
+                    Tag = pckNodeTag
+                };
+                PopulatePckAssetNodes(pckNode.Nodes, workspacePck.File, workspacePck.Path);
+                currentNodes.Add(pckNode);
+            }
+        }
+
+        private static void PopulatePckAssetNodes(TreeNodeCollection rootNodes, PckFile pck, string pckPath)
+        {
+            foreach (var asset in pck.GetAssets().OrderBy(a => a.Filename, StringComparer.OrdinalIgnoreCase))
+            {
+                string path = asset.Filename.Replace('\\', '/');
+                string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0)
+                    continue;
+
+                TreeNodeCollection currentNodes = rootNodes;
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    string part = parts[i];
+                    bool isFile = i == parts.Length - 1;
+
+                    TreeNode? node = currentNodes.Cast<TreeNode>()
+                        .FirstOrDefault(n => string.Equals(n.Text, part, StringComparison.OrdinalIgnoreCase));
+                    if (node == null)
+                    {
+                        node = new TreeNode(part)
+                        {
+                            Name = part,
+                            Tag = isFile ? (object)new ArchiveTreePckAsset(asset, pckPath) : null
+                        };
+                        currentNodes.Add(node);
+                    }
+
+                    currentNodes = node.Nodes;
+                }
+            }
         }
 
         private void ClearArchive()
@@ -837,6 +1842,230 @@ namespace LegacyConsolePackEditor
             labelPckInfo.Text = "No selection";
             UpdateWindowTitle(null);
             toolStripStatusLabel1.Text = "Ready";
+            ShowHomeScreen();
+        }
+
+        private async Task DownloadAndOpenTemplateAsync()
+        {
+            const string templateUrl = "https://github.com/TNTaddicted/MCLCE-Texture-Pack-Editor/raw/refs/heads/main/TexturePackTemplate.zip";
+            string templatesRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCLCE Texture Pack Editor", "Templates");
+            Directory.CreateDirectory(templatesRoot);
+
+            string zipPath = Path.Combine(templatesRoot, "TexturePackTemplate.zip");
+            if (File.Exists(zipPath))
+            {
+                string backup = GetNextUniquePath(templatesRoot, "TexturePackTemplate", ".zip");
+                File.Move(zipPath, backup);
+            }
+
+            try
+            {
+                await DownloadFileWithProgressAsync(templateUrl, zipPath);
+                _settings.LastTemplateZip = zipPath;
+                _settings.Save();
+
+                await UnzipAndOpenTemplateAsync(zipPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Failed to download or open template:\n{ex.Message}", "Template", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                SetProgressVisible(false);
+            }
+        }
+
+        private async Task LoadTemplateAsync()
+        {
+            string? zipPath = _settings.LastTemplateZip;
+            if (string.IsNullOrWhiteSpace(zipPath) || !File.Exists(zipPath))
+            {
+                openFileDialog.Filter = "Template Zip (*.zip)|*.zip|All Files (*.*)|*.*";
+                if (openFileDialog.ShowDialog() != DialogResult.OK)
+                    return;
+
+                zipPath = openFileDialog.FileName;
+            }
+
+            try
+            {
+                await UnzipAndOpenTemplateAsync(zipPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Failed to load template:\n{ex.Message}", "Template", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async Task UnzipAndOpenTemplateAsync(string zipPath)
+        {
+            if (!File.Exists(zipPath))
+                throw new FileNotFoundException("Template ZIP not found.", zipPath);
+
+            CleanupUnusedTemplateWorkspace();
+
+            string templatesRoot = Path.GetDirectoryName(zipPath) ?? Path.GetTempPath();
+            string baseName = Path.GetFileNameWithoutExtension(zipPath);
+            string destination = GetNextUniqueDirectory(templatesRoot, baseName);
+
+            toolStripStatusLabel1.Text = "Extracting template...";
+            SetProgressMarquee(true);
+            await Task.Run(() => ZipFile.ExtractToDirectory(zipPath, destination));
+            SetProgressMarquee(false);
+
+            LoadWorkspaceFolder(destination);
+            _activeTemplateExtractPath = destination;
+            _activeTemplateDirty = false;
+        }
+
+        private async Task DownloadFileWithProgressAsync(string url, string destinationPath)
+        {
+            using var client = new HttpClient();
+            using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+
+            long totalBytes = response.Content.Headers.ContentLength ?? -1;
+            using var contentStream = await response.Content.ReadAsStreamAsync();
+            using var fileStream = File.Create(destinationPath);
+
+            const int bufferSize = 81920;
+            var buffer = new byte[bufferSize];
+            long totalRead = 0;
+            int read;
+
+            SetProgressVisible(true);
+            while ((read = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                await fileStream.WriteAsync(buffer, 0, read);
+                totalRead += read;
+
+                if (totalBytes > 0)
+                {
+                    int percent = (int)((totalRead * 100) / totalBytes);
+                    SetProgress(percent);
+                }
+            }
+
+            SetProgress(100);
+        }
+
+        private static string GetNextUniqueDirectory(string baseFolder, string baseName)
+        {
+            string candidate = Path.Combine(baseFolder, baseName);
+            if (!Directory.Exists(candidate))
+                return candidate;
+
+            int i = 2;
+            while (true)
+            {
+                string alt = Path.Combine(baseFolder, $"{baseName} ({i})");
+                if (!Directory.Exists(alt))
+                    return alt;
+                i++;
+            }
+        }
+
+        private static string GetNextUniquePath(string baseFolder, string baseName, string extension)
+        {
+            string candidate = Path.Combine(baseFolder, baseName + extension);
+            if (!File.Exists(candidate))
+                return candidate;
+
+            int i = 2;
+            while (true)
+            {
+                string alt = Path.Combine(baseFolder, $"{baseName} ({i}){extension}");
+                if (!File.Exists(alt))
+                    return alt;
+                i++;
+            }
+        }
+
+        private void SetProgress(int percent)
+        {
+            if (toolStripProgressBar == null)
+                return;
+
+            toolStripProgressBar.Style = ProgressBarStyle.Continuous;
+            toolStripProgressBar.Value = Math.Clamp(percent, 0, 100);
+        }
+
+        private void SetProgressMarquee(bool enabled)
+        {
+            if (toolStripProgressBar == null)
+                return;
+
+            toolStripProgressBar.Style = enabled ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
+            toolStripProgressBar.MarqueeAnimationSpeed = enabled ? 30 : 0;
+            toolStripProgressBar.Visible = enabled;
+        }
+
+        private void SetProgressVisible(bool visible)
+        {
+            if (toolStripProgressBar == null)
+                return;
+
+            toolStripProgressBar.Visible = visible;
+            if (!visible)
+                toolStripProgressBar.Value = 0;
+        }
+
+        private void ShowHomeScreen()
+        {
+            // Always show the home container and ensure it is in front.
+            if (tabControlMain != null)
+            {
+                tabControlMain.Visible = false;
+                tabControlMain.Enabled = false;
+            }
+
+            if (panelHome != null)
+            {
+                panelHome.Visible = true;
+                panelHome.BringToFront();
+                panelHome.BackColor = _theme.Panel;
+                panelHome.Dock = DockStyle.Fill;
+                panelHome.Invalidate();
+            }
+
+            if (pictureBoxHomeLogo != null && pictureBoxHomeLogo.Image == null)
+            {
+                TryLoadLogoFromResource();
+                if (pictureBoxHomeLogo.Image == null)
+                    TryLoadLogoFromDisk();
+            }
+
+            toolStripStatusLabel1.Text = "Ready";
+            UpdateWindowTitle(null);
+        }
+
+        private void panelHome_Paint(object? sender, PaintEventArgs e)
+        {
+            Rectangle r = panelHome.ClientRectangle;
+            if (r.Width <= 0 || r.Height <= 0)
+                return;
+
+            using var bg = new LinearGradientBrush(r, _theme.Background, _theme.Panel, LinearGradientMode.ForwardDiagonal);
+            e.Graphics.FillRectangle(bg, r);
+
+            // Subtle studio-style glow accents to avoid default flat WinForms feel.
+            using var glow1 = new SolidBrush(Color.FromArgb(48, _theme.Accent));
+            using var glow2 = new SolidBrush(Color.FromArgb(30, ControlPaint.Light(_theme.Accent, 0.35f)));
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.FillEllipse(glow1, new Rectangle(r.Width - 360, -120, 500, 380));
+            e.Graphics.FillEllipse(glow2, new Rectangle(-220, r.Height - 260, 420, 280));
+        }
+
+        private void HideHomeScreen()
+        {
+            if (panelHome != null)
+                panelHome.Visible = false;
+            if (tabControlMain != null)
+            {
+                tabControlMain.Visible = true;
+                tabControlMain.Enabled = true;
+            }
         }
 
         private void AddArchiveEntryNode(TreeNodeCollection root, string key)
@@ -877,6 +2106,25 @@ namespace LegacyConsolePackEditor
 
         private void treeViewArchive_AfterSelect(object sender, TreeViewEventArgs e)
         {
+            // Leaf node inside a workspace PCK (file asset)
+            if (e.Node?.Tag is ArchiveTreePckAsset pckAssetTag)
+            {
+                if (_workspacePcks.TryGetValue(pckAssetTag.PckPath, out var ctx) && _pckFile != ctx.File)
+                {
+                    _pckFile = ctx.File;
+                    _pckFilePath = ctx.Path;
+                    _currentPckKey = null;
+                    PopulatePckAssetList(_pckFile);
+                }
+                SelectPckAsset(pckAssetTag.Asset);
+                tabControlMain.SelectedTab = tabPagePck;
+                extractToolStripMenuItem.Enabled = true;
+                replaceToolStripMenuItem.Enabled = true;
+                deleteToolStripMenuItem.Enabled = true;
+                editSwfToolStripMenuItem.Enabled = false;
+                return;
+            }
+
             if (TryGetWorkspacePckPathFromTag(e.Node?.Tag as string, out string workspacePckPath))
             {
                 SelectWorkspacePck(workspacePckPath);
@@ -903,6 +2151,30 @@ namespace LegacyConsolePackEditor
 
         private void treeViewArchive_NodeMouseDoubleClick(object sender, TreeNodeMouseClickEventArgs e)
         {
+            // Double-click on a workspace PCK asset leaf
+            if (e.Node?.Tag is ArchiveTreePckAsset pckAssetDbl)
+            {
+                if (_workspacePcks.TryGetValue(pckAssetDbl.PckPath, out var ctx) && _pckFile != ctx.File)
+                {
+                    _pckFile = ctx.File;
+                    _pckFilePath = ctx.Path;
+                    _currentPckKey = null;
+                    PopulatePckAssetList(_pckFile);
+                }
+                // Sync list selection first
+                foreach (ListViewItem item in listViewPckAssets.Items)
+                {
+                    if (item.Tag is PckAsset a && a == pckAssetDbl.Asset)
+                    {
+                        item.Selected = true;
+                        item.EnsureVisible();
+                        break;
+                    }
+                }
+                OpenPckAssetFromTree(pckAssetDbl.Asset);
+                return;
+            }
+
             if (!(e.Node?.Tag is string archiveKey) || _archive == null || !_archive.ContainsKey(archiveKey))
                 return;
 
@@ -1077,6 +2349,54 @@ namespace LegacyConsolePackEditor
             if (e.Node?.Tag is PckAsset asset)
             {
                 SelectPckAsset(asset);
+                OpenPckAssetFromTree(asset);
+            }
+        }
+
+        private void OpenPckAssetFromTree(PckAsset asset)
+        {
+            if (IsLanguagesLocAsset(asset))
+            {
+                EditLanguagesLocHex(asset);
+                return;
+            }
+
+            string ext = Path.GetExtension(asset.Filename).ToLowerInvariant();
+            if (IsImageExtension(ext))
+            {
+                OpenImageAssetEditor(asset);
+            }
+            else if (ext == ".pck")
+            {
+                OpenNestedPckAsset(asset);
+            }
+            else
+            {
+                saveFileDialog.FileName = Path.GetFileName(asset.Filename);
+                if (saveFileDialog.ShowDialog() != DialogResult.OK)
+                    return;
+
+                File.WriteAllBytes(saveFileDialog.FileName, asset.Data);
+                toolStripStatusLabel1.Text = $"Extracted asset {asset.Filename} to {saveFileDialog.FileName}";
+            }
+        }
+
+        private void OpenNestedPckAsset(PckAsset asset)
+        {
+            try
+            {
+                using var ms = new MemoryStream(asset.Data, writable: false);
+                var nestedPck = _pckReader.FromStream(ms);
+                _pckFile = nestedPck;
+                _pckFilePath = null;
+                _currentPckKey = asset.Filename;
+                PopulatePckAssetList(nestedPck);
+                tabControlMain.SelectedTab = tabPagePck;
+                toolStripStatusLabel1.Text = $"Opened nested PCK: {asset.Filename} ({nestedPck.AssetCount} assets)";
+            }
+            catch (Exception ex)
+            {
+                toolStripStatusLabel1.Text = $"Failed to open nested PCK: {ex.Message}";
             }
         }
 
@@ -1126,7 +2446,9 @@ namespace LegacyConsolePackEditor
 
                 try
                 {
-                    new ARCFileWriter(_archive).WriteToFile(saveFileDialog.FileName);
+                    _archivePath = saveFileDialog.FileName;
+                    PersistArchiveChanges();
+                    AddRecentPath(saveFileDialog.FileName);
                     toolStripStatusLabel1.Text = $"Saved archive to {saveFileDialog.FileName}";
                 }
                 catch (Exception ex)
@@ -1144,6 +2466,8 @@ namespace LegacyConsolePackEditor
                 {
                     using var fs = File.Create(saveFileDialog.FileName);
                     new PckFileWriter(_pckFile, ByteOrder.BigEndian).WriteToStream(fs);
+                    _pckFilePath = saveFileDialog.FileName;
+                    AddRecentPath(saveFileDialog.FileName);
                     toolStripStatusLabel1.Text = $"Saved PCK to {saveFileDialog.FileName}";
                 }
                 catch (Exception ex)
@@ -1216,13 +2540,17 @@ namespace LegacyConsolePackEditor
                 listViewPckAssets_SelectedIndexChanged(sender, e);
                 OpenImageAssetEditor(asset);
             }
+            else if (ext == ".pck")
+            {
+                OpenNestedPckAsset(asset);
+            }
             else
             {
                 ExtractSelectedPckAsset();
             }
         }
 
-        private void OpenImageAssetEditor(PckAsset asset)
+        private void OpenImageAssetEditor(PckAsset asset, bool persistChanges = true, Action<byte[]>? onApply = null)
         {
             try
             {
@@ -2006,11 +3334,18 @@ namespace LegacyConsolePackEditor
                 {
                     using var ms = new MemoryStream();
                     SaveBitmapByExtension(editBitmap, ms, asset.Filename);
+                    var bytes = ms.ToArray();
 
-                    asset.SetData(ms.ToArray());
-                    PersistPckChanges();
-                    SelectPckAsset(asset);
-                    toolStripStatusLabel1.Text = $"Updated image asset {asset.Filename} in built-in editor.";
+                    if (persistChanges)
+                    {
+                        asset.SetData(bytes);
+                        PersistPckChanges();
+                        SelectPckAsset(asset);
+                        toolStripStatusLabel1.Text = $"Updated image asset {asset.Filename} in built-in editor.";
+                    }
+
+                    onApply?.Invoke(bytes);
+
                     dialog.DialogResult = DialogResult.OK;
                     dialog.Close();
                 };
@@ -2106,6 +3441,65 @@ namespace LegacyConsolePackEditor
         private void toolStripButtonPckDelete_Click(object sender, EventArgs e)
         {
             deleteToolStripMenuItem_Click(sender, e);
+        }
+
+        private void toolStripButtonSwfCapture_Click(object sender, EventArgs e)
+        {
+            OpenSelectedSwfBitmap();
+        }
+
+        private void OpenSelectedSwfBitmap()
+        {
+            if (_activeSwfDocument == null || _listViewSwfAssets == null || _listViewSwfAssets.SelectedItems.Count != 1)
+                return;
+
+            if (_listViewSwfAssets.SelectedItems[0].Tag is not SwfBitmapEntry entry)
+                return;
+
+            var asset = new PckAsset($"swf_{entry.CharacterId}.png", PckAssetType.TextureFile);
+            using (var ms = new MemoryStream())
+            {
+                entry.Bitmap.Save(ms, ImageFormat.Png);
+                asset.SetData(ms.ToArray());
+            }
+
+            OpenImageAssetEditor(asset, persistChanges: false, onApply: (bytes) =>
+            {
+                using var stream = new MemoryStream(bytes, writable: false);
+                using var source = Image.FromStream(stream);
+                using var bitmap = new Bitmap(source);
+
+                _activeSwfDocument.UpdateBitmap(entry.CharacterId, bitmap);
+                SaveActiveSwfDocument();
+                PopulateSwfEditor(_activeSwfDocument, _activeSwfDisplayName ?? Path.GetFileName(_activeSwfPath));
+                SelectSwfBitmapEntry(entry.CharacterId);
+                toolStripStatusLabel1.Text = $"Updated SWF bitmap {entry.CharacterId} in {_activeSwfDisplayName ?? Path.GetFileName(_activeSwfPath)}.";
+            });
+        }
+
+        private void SelectSwfBitmapEntry(int characterId)
+        {
+            if (_listViewSwfAssets == null)
+                return;
+
+            foreach (ListViewItem item in _listViewSwfAssets.Items)
+            {
+                if (item.Tag is SwfBitmapEntry entry && entry.CharacterId == characterId)
+                {
+                    item.Selected = true;
+                    item.Focused = true;
+                    item.EnsureVisible();
+                    break;
+                }
+            }
+        }
+
+        private void SaveActiveSwfDocument()
+        {
+            if (_activeSwfDocument == null || string.IsNullOrWhiteSpace(_activeSwfPath))
+                return;
+
+            File.WriteAllBytes(_activeSwfPath, _activeSwfDocument.ToByteArray());
         }
 
         private void OpenSelectedPckAssetInDefaultApp()
@@ -2825,8 +4219,8 @@ namespace LegacyConsolePackEditor
 
         private void embedSwfEditorToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            _embedSwfEditor = embedSwfEditorToolStripMenuItem.Checked;
-            toolStripStatusLabel1.Text = _embedSwfEditor ? "Embedded SWF editor enabled." : "Embedded SWF editor disabled.";
+            embedSwfEditorToolStripMenuItem.Checked = true;
+            toolStripStatusLabel1.Text = "The native SWF bitmap editor is always enabled.";
         }
 
         private void extractToolStripMenuItem_Click(object sender, EventArgs e)
@@ -2886,7 +4280,7 @@ namespace LegacyConsolePackEditor
 
                 SetupSwfTempWatcher(tempFile, archiveKey);
 
-                await OpenSwfFileAsync(tempFile, archiveKey);
+                await OpenSwfFileAsync(tempFile, archiveKey, addToRecent: false);
             }
             catch (Exception ex)
             {
@@ -2959,164 +4353,53 @@ namespace LegacyConsolePackEditor
                 return;
 
             _archive[archiveKey] = new ConsoleArchiveEntry(bytes);
+            PersistArchiveChanges();
 
-            if (webView2Swf.Visible && tabControlMain.SelectedTab == tabPageSwfEditor)
+            if (string.Equals(_activeSwfPath, tempFile, StringComparison.OrdinalIgnoreCase))
             {
-                await DisplaySwfInInternalViewerAsync(tempFile);
+                await OpenSwfFileAsync(tempFile, _activeSwfDisplayName ?? archiveKey, addToRecent: false);
             }
 
             toolStripStatusLabel1.Text = $"{statusPrefix} into archive: {archiveKey}";
         }
 
-        private bool TryFindJava(out string reason)
-        {
-            reason = string.Empty;
-            try
-            {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "where",
-                    Arguments = "java",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-
-                using var proc = System.Diagnostics.Process.Start(psi);
-                if (proc == null)
-                {
-                    reason = "Failed to start the 'where' command.";
-                    return false;
-                }
-
-                proc.WaitForExit(2000);
-                if (proc.ExitCode != 0)
-                {
-                    reason = "Java is not found on PATH. Install Java 8+ and ensure 'java' is on your PATH.";
-                    return false;
-                }
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                reason = ex.Message;
-                return false;
-            }
-        }
-
-        private void OpenSwfExternally(string jar, string tempFile, string archiveKey)
+        private async Task OpenSwfFileAsync(string swfPath, string displayName, bool addToRecent = true)
         {
             try
             {
-                if (!File.Exists(jar))
+                if (!File.Exists(swfPath))
                 {
-                    MessageBox.Show(this, $"The SWF editor jar was not found:\n{jar}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(this, $"The SWF file was not found:\n{swfPath}", "Open SWF", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
 
-                if (!File.Exists(tempFile))
+                byte[] swfBytes = await File.ReadAllBytesAsync(swfPath);
+                SwfBitmapDocument? document = SwfBitmapDocument.Load(swfBytes, out string error);
+                if (document == null)
                 {
-                    MessageBox.Show(this, $"The temporary SWF file was not found:\n{tempFile}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    ClearSwfEditor("This SWF does not contain editable embedded bitmap tags.");
+                    MessageBox.Show(this, $"Failed to open SWF natively: {error}", "SWF Editor", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
-                if (!TryFindJava(out var javaReason))
+                if (document.Bitmaps.Count == 0)
                 {
-                    MessageBox.Show(this, "Cannot launch SWF editor because Java is not available:\n" + javaReason, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    document.Dispose();
+                    ClearSwfEditor("This SWF does not contain editable embedded bitmap tags.");
+                    MessageBox.Show(this, "Yo! Sorry to annoy but some .swf files are annoying to open, this is one of them... I'll try to make it work ASAP. For now please use an external editor for this file. Thanks for understanding!", "SWF Editor", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
 
-                string jarDir = Path.GetDirectoryName(jar) ?? Environment.CurrentDirectory;
-
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "java",
-                    Arguments = $"-jar \"{jar}\" \"{tempFile}\"",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    WorkingDirectory = jarDir
-                };
-
-                var proc = System.Diagnostics.Process.Start(psi);
-                if (proc == null)
-                {
-                    MessageBox.Show(this, "Failed to start Java process.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
-                }
-
-                proc.EnableRaisingEvents = true;
-                proc.Exited += (s, e) =>
-                {
-                    try
-                    {
-                        string outText = proc.StandardOutput.ReadToEnd();
-                        string errText = proc.StandardError.ReadToEnd();
-                        if (proc.ExitCode != 0)
-                        {
-                            BeginInvoke((Action)(() =>
-                            {
-                                MessageBox.Show(this, $"SWF editor exited with code {proc.ExitCode}.\n\nSTDOUT:\n{outText}\n\nSTDERR:\n{errText}", "SWF Editor Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            }));
-                        }
-                    }
-                    catch { }
-                };
-
-                toolStripStatusLabel1.Text = $"Opened SWF externally: {archiveKey}.";
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Failed to launch SWF editor: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private async Task OpenSwfFileAsync(string swfPath, string displayName)
-        {
-            try
-            {
-                if (_embedSwfEditor)
-                {
-                    bool loadedInViewer = await DisplaySwfInInternalViewerAsync(swfPath);
-                    if (loadedInViewer)
-                        return;
-
-                    var fallbackJar = GetSwfEditorJarPath();
-                    if (fallbackJar != null)
-                    {
-                        bool embedded = await TryEmbedSwfEditorAsync(fallbackJar, swfPath, displayName);
-                        if (embedded)
-                            return;
-                    }
-                }
-
-                var jar = GetSwfEditorJarPath();
-                if (jar == null)
-                {
-                    var result = MessageBox.Show(this, "Could not locate ffdec.jar. Would you like to locate it manually?", "SWF Editor Not Found", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-                    if (result == DialogResult.Yes)
-                    {
-                        using var jarDialog = new OpenFileDialog
-                        {
-                            Filter = "Java JAR File (*.jar)|*.jar",
-                            Title = "Select ffdec.jar"
-                        };
-                        if (jarDialog.ShowDialog(this) == DialogResult.OK)
-                        {
-                            _settings.SwfEditorJarPath = jarDialog.FileName;
-                            _settings.Save();
-                            jar = jarDialog.FileName;
-                        }
-                    }
-
-                    if (jar == null)
-                        return;
-                }
-
-                OpenSwfExternally(jar, swfPath, displayName);
+                _activeSwfDocument?.Dispose();
+                _activeSwfDocument = document;
+                _activeSwfPath = swfPath;
+                _activeSwfDisplayName = displayName;
+                PopulateSwfEditor(document, displayName);
+                HideHomeScreen();
+                tabControlMain.SelectedTab = tabPageSwfEditor;
+                if (addToRecent)
+                    AddRecentPath(swfPath);
+                toolStripStatusLabel1.Text = $"Opened SWF bitmap editor for {displayName} ({document.Bitmaps.Count} embedded bitmap(s)).";
             }
             catch (Exception ex)
             {
@@ -3125,229 +4408,18 @@ namespace LegacyConsolePackEditor
             }
         }
 
-        private async Task<bool> DisplaySwfInInternalViewerAsync(string swfFilePath)
-        {
-            try
-            {
-                byte[] swfBytes = File.ReadAllBytes(swfFilePath);
-                string base64 = Convert.ToBase64String(swfBytes);
-
-                var runtimeCandidates = new List<string>
-                {
-                    Path.Combine(AppContext.BaseDirectory, "ruffle", "ruffle.js"),
-                    Path.Combine(Application.StartupPath, "ruffle", "ruffle.js"),
-                    Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? AppContext.BaseDirectory, "ruffle", "ruffle.js")
-                };
-
-                string? runtimeScript = null;
-                foreach (var candidate in runtimeCandidates.Where(File.Exists).Distinct())
-                {
-                    string candidateScript = File.ReadAllText(candidate);
-                    if (candidateScript.IndexOf("RufflePlayer", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                        candidateScript.IndexOf("Placeholder", StringComparison.OrdinalIgnoreCase) < 0)
-                    {
-                        runtimeScript = candidateScript;
-                        break;
-                    }
-                }
-
-                string ruffleScriptTag;
-                if (runtimeScript != null)
-                {
-                    ruffleScriptTag = $"<script>{runtimeScript}</script>";
-                    toolStripStatusLabel1.Text = $"Viewing SWF (offline runtime): {Path.GetFileName(swfFilePath)}";
-                }
-                else
-                {
-                    toolStripStatusLabel1.Text = "Built-in SWF runtime missing, falling back to embedded FFDec.";
-                    return false;
-                }
-
-                string html = "<!DOCTYPE html>" +
-                    "<html><head><meta charset=\"utf-8\"/>" +
-                    "<style>body{margin:0;background:#000;color:#eee;display:flex;justify-content:center;align-items:center;font-family:Segoe UI,Arial,sans-serif;}</style>" +
-                    ruffleScriptTag +
-                    "</head><body><div id=\"player\" style=\"width:100%;height:100%;\"></div>" +
-                    "<script>function initRuffle(){if(!window.RufflePlayer){document.body.innerHTML='<div style=\"padding:16px;text-align:center;\">Ruffle runtime failed to load.<br/>Put a real ruffle.js into app/ruffle or keep internet on for CDN fallback.</div>';return;}const ruffle=window.RufflePlayer.newest();const player=ruffle.createPlayer();document.getElementById('player').appendChild(player);player.style.width='100%';player.style.height='100%';player.load('data:application/x-shockwave-flash;base64," + base64 + "');}window.addEventListener('DOMContentLoaded',initRuffle);</script>" +
-                    "</body></html>";
-
-                panelSwfHost.Visible = false;
-                webView2Swf.Visible = true;
-
-                await webView2Swf.EnsureCoreWebView2Async();
-                webView2Swf.NavigateToString(html);
-
-                tabControlMain.SelectedTab = tabPageSwfEditor;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Failed to display SWF: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return false;
-            }
-        }
-
-        private async Task<bool> TryEmbedSwfEditorAsync(string jar, string tempFile, string archiveKey)
-        {
-            try
-            {
-                webView2Swf.Visible = false;
-                panelSwfHost.Visible = true;
-
-                CleanupEmbeddedSwfEditor();
-                StartSwfEmbedMonitor();
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "java",
-                    Arguments = $"-jar \"{jar}\" \"{tempFile}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = false,
-                    RedirectStandardError = false
-                };
-
-                _swfEditorProcess = System.Diagnostics.Process.Start(psi);
-                if (_swfEditorProcess == null)
-                    throw new InvalidOperationException("Failed to start SWF editor process.");
-
-                // Let the monitor timer handle embedding when the editor window appears.
-                tabControlMain.SelectedTab = tabPageSwfEditor;
-                toolStripStatusLabel1.Text = $"Launched SWF editor (embedded window will appear shortly).";
-                return true;
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Failed to launch embedded SWF editor: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return false;
-            }
-        }
-
-        private void StartSwfEmbedMonitor()
-        {
-            if (_swfEmbedMonitorTimer != null)
-                return;
-
-            _swfEmbedMonitorTimer = new System.Windows.Forms.Timer();
-            _swfEmbedMonitorTimer.Interval = 750;
-            _swfEmbedMonitorTimer.Tick += (s, e) =>
-            {
-                if (_swfEditorProcess == null || _swfEditorProcess.HasExited)
-                {
-                    _swfEmbedMonitorTimer.Stop();
-                    return;
-                }
-
-                var handle = _swfEditorProcess.MainWindowHandle;
-                if (handle != IntPtr.Zero && handle != _swfEditorHandle)
-                {
-                    _swfEditorHandle = handle;
-                    SetParent(_swfEditorHandle, panelSwfHost.Handle);
-                    int style = GetWindowLong(_swfEditorHandle, GWL_STYLE);
-                    style = (style | WS_CHILD) & ~(WS_BORDER | WS_DLGFRAME);
-                    SetWindowLong(_swfEditorHandle, GWL_STYLE, style);
-                    ResizeEmbeddedEditor();
-                }
-            };
-            _swfEmbedMonitorTimer.Start();
-        }
-
-        private void StopSwfEmbedMonitor()
-        {
-            if (_swfEmbedMonitorTimer == null)
-                return;
-
-            _swfEmbedMonitorTimer.Stop();
-            _swfEmbedMonitorTimer.Dispose();
-            _swfEmbedMonitorTimer = null;
-        }
-
-        private void ResizeEmbeddedEditor()
-        {
-            if (_swfEditorHandle == IntPtr.Zero || panelSwfHost.IsDisposed)
-                return;
-
-            MoveWindow(_swfEditorHandle, 0, 0, panelSwfHost.ClientSize.Width, panelSwfHost.ClientSize.Height, true);
-        }
-
-        private void CleanupEmbeddedSwfEditor()
-        {
-            try
-            {
-                StopSwfEmbedMonitor();
-
-                if (_swfEditorProcess != null && !_swfEditorProcess.HasExited)
-                {
-                    _swfEditorProcess.Kill(true);
-                    _swfEditorProcess.Dispose();
-                }
-            }
-            catch { }
-            finally
-            {
-                _swfEditorProcess = null;
-                _swfEditorHandle = IntPtr.Zero;
-            }
-        }
-
-        private IntPtr FindWindowHandleForProcess(int processId)
-        {
-            IntPtr found = IntPtr.Zero;
-            EnumWindows((hWnd, lParam) =>
-            {
-                if (!IsWindowVisible(hWnd))
-                    return true;
-
-                _ = GetWindowThreadProcessId(hWnd, out uint windowPid);
-                if (windowPid != processId)
-                    return true;
-
-                var sb = new StringBuilder(256);
-                GetWindowText(hWnd, sb, sb.Capacity);
-                string title = sb.ToString();
-
-                if (title.IndexOf("JPEXS", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    title.IndexOf("ffdec", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    title.IndexOf("Flash", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    found = hWnd;
-                    return false;
-                }
-
-                return true;
-            }, IntPtr.Zero);
-            return found;
-        }
-
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            CleanupEmbeddedSwfEditor();
+            _activeSwfDocument?.Dispose();
+            _activeSwfDocument = null;
+
+            CleanupUnusedTemplateWorkspace();
 
             if (_swfTempWatcher != null)
             {
                 _swfTempWatcher.Dispose();
                 _swfTempWatcher = null;
             }
-        }
-
-        private string? GetSwfEditorJarPath()
-        {
-            if (!string.IsNullOrEmpty(_settings.SwfEditorJarPath) && File.Exists(_settings.SwfEditorJarPath))
-                return _settings.SwfEditorJarPath;
-
-            string baseDir = AppContext.BaseDirectory;
-            string candidate = Path.Combine(baseDir, "ffdec", "ffdec.jar");
-            if (File.Exists(candidate))
-                return candidate;
-
-            candidate = Path.Combine(baseDir, "ffdec.jar");
-            if (File.Exists(candidate))
-                return candidate;
-
-            string alt = Path.Combine(baseDir, "..", "ffdec", "ffdec.jar");
-            if (File.Exists(alt))
-                return Path.GetFullPath(alt);
-
-            return null;
         }
 
         private void replaceToolStripMenuItem_Click(object sender, EventArgs e)
@@ -3367,6 +4439,33 @@ namespace LegacyConsolePackEditor
                         return;
 
                     var replacementData = File.ReadAllBytes(openFileDialog.FileName);
+
+                    // Some console .loc language files must remain the same size after editing
+                    // (they are fixed-format tables which will crash the game if size changes).
+                    if (asset.Filename.EndsWith(".loc", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int originalSize = asset.Data.Length;
+                        if (replacementData.Length > originalSize)
+                        {
+                            var result = MessageBox.Show(this,
+                                $"The replacement file is larger ({replacementData.Length} bytes) than the original ({originalSize} bytes).\n" +
+                                "Changing the file size may cause the game to crash.\n\n" +
+                                "Do you want to truncate the replacement to the original size?",
+                                "Replace .loc File", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                            if (result != DialogResult.Yes)
+                                return;
+
+                            Array.Resize(ref replacementData, originalSize);
+                        }
+                        else if (replacementData.Length < originalSize)
+                        {
+                            int oldLen = replacementData.Length;
+                            Array.Resize(ref replacementData, originalSize);
+                            for (int i = oldLen; i < originalSize; i++)
+                                replacementData[i] = 0;
+                        }
+                    }
+
                     asset.SetData(replacementData);
                     PersistPckChanges();
                     listViewPckAssets.SelectedItems[0].SubItems[1].Text = asset.Size.ToString("N0");
@@ -3388,6 +4487,7 @@ namespace LegacyConsolePackEditor
             if (treeViewArchive.SelectedNode?.Tag is string archiveKey && _archive.ContainsKey(archiveKey))
             {
                 _archive[archiveKey] = new ConsoleArchiveEntry(archiveReplacementData);
+                PersistArchiveChanges();
                 toolStripStatusLabel1.Text = $"Replaced file {archiveKey}";
             }
         }
@@ -3413,6 +4513,7 @@ namespace LegacyConsolePackEditor
             if (treeViewArchive.SelectedNode?.Tag is string archiveKey && _archive.ContainsKey(archiveKey))
             {
                 _archive.Remove(archiveKey);
+                PersistArchiveChanges();
                 treeViewArchive.SelectedNode.Remove();
                 toolStripStatusLabel1.Text = $"Removed {archiveKey} from archive";
             }
@@ -3422,6 +4523,8 @@ namespace LegacyConsolePackEditor
         {
             if (_pckFile == null)
                 return;
+
+            MarkTemplateWorkspaceDirty();
 
             if (!string.IsNullOrEmpty(_currentPckKey) && _archive != null)
             {
@@ -3444,6 +4547,55 @@ namespace LegacyConsolePackEditor
             using var ms = new MemoryStream();
             new PckFileWriter(_pckFile, ByteOrder.BigEndian).WriteToStream(ms);
             _archive[_currentPckKey] = new ConsoleArchiveEntry(ms.ToArray());
+            PersistArchiveChanges();
+        }
+
+        private void PersistArchiveChanges()
+        {
+            if (_archive == null || string.IsNullOrWhiteSpace(_archivePath))
+                return;
+
+            MarkTemplateWorkspaceDirty();
+
+            using var fs = File.Create(_archivePath);
+            new ARCFileWriter(_archive).WriteToStream(fs);
+        }
+
+        private void MarkTemplateWorkspaceDirty()
+        {
+            if (string.IsNullOrWhiteSpace(_activeTemplateExtractPath) || string.IsNullOrWhiteSpace(_workspaceFolderPath))
+                return;
+
+            if (string.Equals(_activeTemplateExtractPath, _workspaceFolderPath, StringComparison.OrdinalIgnoreCase))
+                _activeTemplateDirty = true;
+        }
+
+        private void CleanupUnusedTemplateWorkspace()
+        {
+            if (string.IsNullOrWhiteSpace(_activeTemplateExtractPath))
+                return;
+
+            if (_activeTemplateDirty)
+            {
+                _activeTemplateExtractPath = null;
+                _activeTemplateDirty = false;
+                return;
+            }
+
+            try
+            {
+                if (Directory.Exists(_activeTemplateExtractPath))
+                    Directory.Delete(_activeTemplateExtractPath, recursive: true);
+            }
+            catch
+            {
+                // Best-effort cleanup only.
+            }
+            finally
+            {
+                _activeTemplateExtractPath = null;
+                _activeTemplateDirty = false;
+            }
         }
 
         private void ClearPreview()

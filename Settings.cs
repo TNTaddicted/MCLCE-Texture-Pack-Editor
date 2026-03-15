@@ -1,49 +1,52 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 
-namespace LegacyConsolePackEditor
+namespace LegacyConsolePackEditor;
+
+internal sealed class Settings
 {
-    internal class Settings
+    private const string SettingsFileName = "settings.json";
+
+    public List<string> RecentPaths { get; set; } = new();
+    public string? LastTemplateZip { get; set; }
+    public string ThemeMode { get; set; } = "Dark";
+    public string AccentName { get; set; } = "Teal";
+
+    public static Settings Load()
     {
-        private const string SettingsFileName = "settings.json";
-
-        public string? SwfEditorJarPath { get; set; }
-
-        public static Settings Load()
+        try
         {
-            try
-            {
-                string path = GetSettingsPath();
-                if (!File.Exists(path))
-                    return new Settings();
-
-                var json = File.ReadAllText(path);
-                return JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
-            }
-            catch
-            {
+            string path = GetSettingsPath();
+            if (!File.Exists(path))
                 return new Settings();
-            }
-        }
 
-        public void Save()
-        {
-            try
-            {
-                string path = GetSettingsPath();
-                File.WriteAllText(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
-            }
-            catch
-            {
-                // best-effort
-            }
+            string json = File.ReadAllText(path);
+            return JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
         }
+        catch
+        {
+            return new Settings();
+        }
+    }
 
-        private static string GetSettingsPath()
+    public void Save()
+    {
+        try
         {
-            string dir = AppContext.BaseDirectory;
-            return Path.Combine(dir, SettingsFileName);
+            string path = GetSettingsPath();
+            string json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(path, json);
         }
+        catch
+        {
+            // best effort only
+        }
+    }
+
+    private static string GetSettingsPath()
+    {
+        return Path.Combine(AppContext.BaseDirectory, SettingsFileName);
     }
 }
