@@ -1,4 +1,4 @@
-# Legacy Console Pack Editor
+# Legacy Console Pack Editor ![GitHub All Releases](https://img.shields.io/github/downloads/TNTaddicted/MCLCE-Texture-Pack-Editor/total)
 
 A small WinForms tool for browsing and editing `.arc` (`.swf`) and `.pck` packages used in legacy Minecraft console editions.
 
