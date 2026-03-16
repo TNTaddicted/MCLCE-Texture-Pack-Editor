@@ -50,3 +50,6 @@ bin\\Release\\net8.0-windows\\LegacyConsolePackEditor.exe
 
 ## Special thanks:
 - CheapManga for his [Template](https://github.com/cheapmanga/Texture-Pack-Template)
+- [MUArchiveEditor's](https://github.com/PhoenixARC/MUArchiveEditor) source code to understand `.arc` unzipping
+- [PCK Studio's](https://github.com/LCERD/PCK-Studio) source code to understnad `.pck` editing
+- [Jpexs decompiler's](https://github.com/jindrapetrik/jpexs-decompiler) source the the painful `.swf` editing
