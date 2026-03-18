@@ -1,7 +1,9 @@
 #define MyAppName "MC LCE TP Editor"
 #define MyAppVersion "0.3"
 #define MyAppExeName "LegacyConsolePackEditor.exe"
-#define MySourceDir "C:\Users\eolia\minecraft-legacy-editor\LegacyConsolePackEditor\bin\Release\net8.0-windows"
+#ifndef MySourceDir
+  #define MySourceDir "bin\Release\net8.0-windows\win-x64\publish"
+#endif
 
 [Setup]
 AppId={{C8E7B3C2-4D3F-4B6A-9A1B-9F9D11B0A001}

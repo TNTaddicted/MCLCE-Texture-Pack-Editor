@@ -7,6 +7,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>Cactus_1.13.ico</ApplicationIcon>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyTitle>MCLCE Texture Pack Editor</AssemblyTitle>
     <AssemblyProduct>MCLCE Texture Pack Editor</AssemblyProduct>
     <RootNamespace>MCLCETexturePackEditor</RootNamespace>
