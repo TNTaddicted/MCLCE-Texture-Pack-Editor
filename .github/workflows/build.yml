@@ -1,0 +1,56 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-latest
+            name: macos
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Publish (win-x64)
+        run: dotnet publish -c Release -r win-x64 --self-contained false -o publish/
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LegacyConsolePackEditor-${{ matrix.name }}
+          path: publish/
+
+      - name: Build Windows installer (Inno Setup)
+        if: matrix.name == 'windows'
+        run: iscc /DMySourceDir=publish LegacyConsolePackEditorInstaller.iss
+
+      - name: Upload Windows installer artifact
+        if: matrix.name == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: LegacyConsolePackEditor-Installer
+          path: LegacyConsolePackEditor-Setup.exe
