@@ -46,6 +46,7 @@ bin\\Release\\net8.0-windows\\LegacyConsolePackEditor.exe
 - [x] In-app .png editor
 - [x] Open folders
 - [x] Basic Hex editor
+- [ ] Beginner/Baby mode with basic file names etc...
 
 
 ## Special thanks:
